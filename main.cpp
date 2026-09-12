@@ -1,164 +1,147 @@
-﻿#include "main.h"
+#include "main.h"
 #include <thread>
 #include <vector>
 #include <atomic>
 #include <chrono>
 #include <iomanip>
+#include <limits>
 
 // Atomic counter for progress tracking
 std::atomic<long long unsigned int> global_progress(0);
 
-//
-//real_type intersect_AABB(const vector_3 min_location, const vector_3 max_location, const vector_3 ray_origin, const vector_3 ray_dir, real_type& tmin, real_type& tmax)
-//{
-//	tmin = (min_location.x - ray_origin.x) / ray_dir.x;
-//	tmax = (max_location.x - ray_origin.x) / ray_dir.x;
-//
-//	if (tmin > tmax)
-//		swap(tmin, tmax);
-//
-//	real_type tymin = (min_location.y - ray_origin.y) / ray_dir.y;
-//	real_type tymax = (max_location.y - ray_origin.y) / ray_dir.y;
-//
-//	if (tymin > tymax)
-//		swap(tymin, tymax);
-//
-//	if ((tmin > tymax) || (tymin > tmax))
-//		return 0;
-//
-//	if (tymin > tmin)
-//		tmin = tymin;
-//
-//	if (tymax < tmax)
-//		tmax = tymax;
-//
-//	real_type tzmin = (min_location.z - ray_origin.z) / ray_dir.z;
-//	real_type tzmax = (max_location.z - ray_origin.z) / ray_dir.z;
-//
-//	if (tzmin > tzmax)
-//		swap(tzmin, tzmax);
-//
-//	if ((tmin > tzmax) || (tzmin > tmax))
-//		return 0;
-//
-//	if (tzmin > tmin)
-//		tmin = tzmin;
-//
-//	if (tzmax < tmax)
-//		tmax = tzmax;
-//
-//	if (tmin < 0 || tmax < 0)
-//		return 0;
-//
-//	vector_3 ray_hit_start = ray_origin;
-//	ray_hit_start.x += ray_dir.x * tmin;
-//	ray_hit_start.y += ray_dir.y * tmin;
-//	ray_hit_start.z += ray_dir.z * tmin;
-//
-//	vector_3 ray_hit_end = ray_origin;
-//	ray_hit_end.x += ray_dir.x * tmax;
-//	ray_hit_end.y += ray_dir.y * tmax;
-//	ray_hit_end.z += ray_dir.z * tmax;
-//
-//	real_type l = (ray_hit_end - ray_hit_start).length();
-//
-//	return l;
-//}
 
-inline bool point_in_AABB(const vector_3 min_location, const vector_3 max_location, const vector_3 p)
+// Length of each line segment the ray is broken into
+const real_type segment_length = 1.0;
+
+// Slab test for a finite line segment against an axis-aligned bounding box.
+// Returns true when any part of the segment lies inside the box.
+bool intersect_segment_AABB(
+	const vector_3 min_location,
+	const vector_3 max_location,
+	const vector_3 segment_start,
+	const vector_3 segment_end)
 {
-	return p.x >= min_location.x && p.x <= max_location.x
-		&& p.y >= min_location.y && p.y <= max_location.y
-		&& p.z >= min_location.z && p.z <= max_location.z;
-}
+	const vector_3 d = segment_end - segment_start;
 
-// Segment-marching alternative to intersect_AABB.
-// Walks from ray_origin along ray_dir (assumed unit length) in steps of
-// segment_length, up to march_distance, and sums the length of every
-// segment that lies entirely inside the box (both endpoints inside; the box
-// is convex, so that implies the whole segment is inside).
-// tmin/tmax are set to the parametric start/end of the first and last
-// interior segments, mirroring intersect_AABB.
-real_type intersect_AABB_segments(
-	const vector_3 min_location, const vector_3 max_location,
-	const vector_3 ray_origin, const vector_3 ray_dir,
-	const real_type segment_length, const real_type march_distance,
-	real_type& tmin, real_type& tmax)
-{
-	tmin = tmax = 0;
+	const real_type s[3] = { segment_start.x, segment_start.y, segment_start.z };
+	const real_type dd[3] = { d.x, d.y, d.z };
+	const real_type mn[3] = { min_location.x, min_location.y, min_location.z };
+	const real_type mx[3] = { max_location.x, max_location.y, max_location.z };
 
-	const long long unsigned int num_segments =
-		static_cast<long long unsigned int>(ceil(march_distance / segment_length));
+	// Segment parameter runs from 0 at the start to 1 at the end
+	real_type t0 = 0.0;
+	real_type t1 = 1.0;
 
-	real_type length_inside = 0;
-	bool found = false;
-
-	vector_3 seg_start = ray_origin;
-	bool start_inside = point_in_AABB(min_location, max_location, seg_start);
-
-	for (long long unsigned int s = 0; s < num_segments; s++)
+	for (size_t i = 0; i < 3; i++)
 	{
-		const real_type t_end = (s + 1) * segment_length;
-
-		vector_3 seg_end = ray_origin;
-		seg_end.x += ray_dir.x * t_end;
-		seg_end.y += ray_dir.y * t_end;
-		seg_end.z += ray_dir.z * t_end;
-
-		const bool end_inside = point_in_AABB(min_location, max_location, seg_end);
-
-		if (start_inside && end_inside)
+		if (fabs(dd[i]) < 1e-20)
 		{
-			length_inside += segment_length;
+			// Segment is parallel to this pair of slabs
+			if (s[i] < mn[i] || s[i] > mx[i])
+				return false;
 
-			if (!found)
-			{
-				tmin = s * segment_length;
-				found = true;
-			}
-
-			tmax = t_end;
-		}
-		else if (found)
-		{
-			// Convex box: once we've been inside and then leave, we never re-enter.
-			break;
+			continue;
 		}
 
-		seg_start = seg_end;
-		start_inside = end_inside;
+		const real_type inv = 1.0 / dd[i];
+
+		real_type ta = (mn[i] - s[i]) * inv;
+		real_type tb = (mx[i] - s[i]) * inv;
+
+		if (ta > tb)
+			swap(ta, tb);
+
+		if (ta > t0)
+			t0 = ta;
+
+		if (tb < t1)
+			t1 = tb;
+
+		if (t0 > t1)
+			return false;
 	}
 
-	return length_inside;
+	return true;
+}
+
+// Breaks the ray into segments of segment_length and counts how many of
+// those segments collide with the box. Every segment is tested directly --
+// there is no line-box test anywhere in here.
+//
+// The march stops at the farthest corner of the box, since no point beyond
+// that distance can possibly be inside it. It also stops early once the
+// segments have entered and then left the box, because a box is convex and
+// so the colliding segments form one contiguous run.
+real_type intersect_AABB(const vector_3 min_location, const vector_3 max_location, vector_3 ray_origin, vector_3 ray_dir, real_type& tmin, real_type& tmax)
+{
+	tmin = 0;
+	tmax = 0;
+
+	const real_type fx = max(fabs(min_location.x - ray_origin.x), fabs(max_location.x - ray_origin.x));
+	const real_type fy = max(fabs(min_location.y - ray_origin.y), fabs(max_location.y - ray_origin.y));
+	const real_type fz = max(fabs(min_location.z - ray_origin.z), fabs(max_location.z - ray_origin.z));
+
+	const real_type max_distance = sqrt(fx * fx + fy * fy + fz * fz);
+
+	const long long unsigned int segment_count =
+		static_cast<long long unsigned int>(ceil(max_distance / segment_length));
+
+	real_type total_length = 0;
+	bool found_hit = false;
+
+	for (long long unsigned int i = 0; i < segment_count; i++)
+	{
+		const vector_3 segment_start = ray_origin + ray_dir * (i * segment_length);
+		const vector_3 segment_end = ray_origin + ray_dir * ((i + 1) * segment_length);
+
+		if (intersect_segment_AABB(min_location, max_location, segment_start, segment_end))
+		{
+			if (false == found_hit)
+			{
+				tmin = i * segment_length;
+				found_hit = true;
+			}
+
+			tmax = (i + 1) * segment_length;
+			total_length += segment_length;
+		}
+		else if (found_hit)
+		{
+			break;
+		}
+	}
+
+	return total_length;
 }
 
 real_type intersect(
 	const vector_3 location,
 	const vector_3 normal,
-	const real_type receiver_distance,
-	const real_type receiver_radius)
+	const real_type epsilon,
+	const vector_3 min_location,
+	const vector_3 max_location)
 {
 	//const vector_3 circle_origin(receiver_distance, 0, 0);
 
 	//if (normal.dot(circle_origin) <= 0)
 	//	return 0.0;
 
-	vector_3 min_location(-receiver_radius + receiver_distance, -receiver_radius, -receiver_radius);
-	vector_3 max_location(receiver_radius + receiver_distance, receiver_radius, receiver_radius);
 
+
+
+
+	//vector_3 min_location(-receiver_radius + receiver_distance, -receiver_radius, -receiver_radius);
+	//vector_3 max_location(receiver_radius + receiver_distance, receiver_radius, receiver_radius);
+
+
+
+
+
+
+	
 	real_type tmin = 0, tmax = 0;
 
-	// March in steps of a fraction of the receiver radius. The furthest any
-	// point of the box can be from the ray origin (which sits on the emitter
-	// sphere of radius |location|) is bounded by |location| + distance to the
-	// far corner, so marching that far guarantees we pass through the box.
-	const real_type segment_length = receiver_radius * 0.01;
-	const real_type march_distance =
-		location.length() + receiver_distance + receiver_radius * sqrt(3.0);
-
-	return intersect_AABB_segments(
-		min_location, max_location, location, normal,
-		segment_length, march_distance, tmin, tmax);
+	return intersect_AABB(min_location, max_location, location, normal, tmin, tmax);
 }
 
 // Thread-local versions of random functions that take generator and distribution as parameters
@@ -199,8 +182,10 @@ void worker_thread(
 	const real_type receiver_distance,
 	const real_type receiver_distance_plus,
 	const real_type receiver_radius,
+	const real_type epsilon,
 	real_type& result_count,
-	real_type& result_count_plus)
+	real_type& result_count_plus,
+	real_type& result_count_forward)
 {
 	// Thread-local random number generator
 	std::mt19937 local_gen(thread_seed);
@@ -208,6 +193,8 @@ void worker_thread(
 
 	real_type local_count = 0;
 	real_type local_count_plus = 0;
+	real_type local_count_forward = 0;
+
 
 	// Update progress every N iterations to reduce atomic overhead
 	const long long unsigned int progress_update_interval = 10000;
@@ -243,13 +230,82 @@ void worker_thread(
 
 		vector_3 normal = (location - r).normalize();
 
+
+
+
+
+		vector_3 aabb_min_location(-receiver_radius + receiver_distance, -receiver_radius, -receiver_radius);
+		vector_3 aabb_max_location(receiver_radius + receiver_distance, receiver_radius, receiver_radius);
+
+
+		vector_3 right_min_location = aabb_min_location;
+		right_min_location.x += epsilon;
+
+		vector_3 right_max_location = aabb_max_location;
+		right_max_location.x += epsilon;
+
+		vector_3 forward_min_location = aabb_min_location;
+		forward_min_location.z += epsilon;
+
+		vector_3 forward_max_location = aabb_max_location;
+		forward_max_location.z += epsilon;
+
+
+
+		//vector_3 right_min_location = aabb_min_location;
+		//vector_3 right_min_location_plus = aabb_min_location;
+		//right_min_location_plus.x += epsilon;
+
+		//vector_3 right_max_location = aabb_max_location;
+		//vector_3 right_max_location_plus = aabb_max_location;
+		//right_max_location_plus.x += epsilon;
+
+		//vector_3 forward_min_location_plus = aabb_min_location;
+
+		//vector_3 forward_max_location_plus = aabb_max_location;
+		//forward_max_location_plus.z += epsilon;
+
+		//pair<real_type, real_type> p0 =
+		//	intersect(
+		//		location, normal, sideways,
+		//		aabb_min_location, aabb_max_location,
+		//		receiver_radius,
+		//		emitter_radius,
+		//		epsilon);
+
+		//pair<real_type, real_type> p1 =
+		//	intersect(
+		//		location, normal, sideways,
+		//		right_min_location, right_max_location,
+		//		receiver_radius,
+		//		emitter_radius,
+		//		epsilon);
+
+		//pair<real_type, real_type> p2 =
+		//	intersect(
+		//		location, normal, sideways,
+		//		forward_min_location, forward_max_location,
+		//		receiver_radius,
+		//		emitter_radius,
+		//		epsilon);
+
+
+
+
 		local_count += intersect(
 			location, normal,
-			receiver_distance, receiver_radius);
+			epsilon, aabb_min_location, aabb_max_location);
 
 		local_count_plus += intersect(
 			location, normal,
-			receiver_distance_plus, receiver_radius);
+			epsilon, right_min_location, right_max_location);
+
+		local_count_forward += intersect(
+			location, normal,
+			epsilon, forward_min_location, forward_max_location);
+
+
+
 
 		// Update global progress periodically
 		local_progress++;
@@ -268,6 +324,7 @@ void worker_thread(
 
 	result_count = local_count;
 	result_count_plus = local_count_plus;
+	result_count_forward = local_count_forward;
 }
 
 // Progress monitor function that runs on main thread
@@ -300,12 +357,13 @@ void progress_monitor(long long unsigned int total_iterations, std::atomic<bool>
 	cout << "\rProgress: 100.00% | Complete!                              " << endl;
 }
 
-real_type get_intersecting_line_density(
+pair<real_type, real_type> get_intersecting_line_density(
 	const long long unsigned int n,
 	const real_type emitter_radius,
 	const real_type receiver_distance,
 	const real_type receiver_distance_plus,
-	const real_type receiver_radius)
+	const real_type receiver_radius,
+	const real_type epsilon)
 {
 	// Reset global progress counter
 	global_progress.store(0, std::memory_order_relaxed);
@@ -319,6 +377,7 @@ real_type get_intersecting_line_density(
 	std::vector<std::thread> threads;
 	std::vector<real_type> thread_counts(num_threads, 0);
 	std::vector<real_type> thread_counts_plus(num_threads, 0);
+	std::vector<real_type> thread_counts_forward(num_threads, 0);
 
 	// Flag to signal progress monitor to stop
 	std::atomic<bool> done(false);
@@ -351,8 +410,10 @@ real_type get_intersecting_line_density(
 			receiver_distance,
 			receiver_distance_plus,
 			receiver_radius,
+			epsilon,
 			std::ref(thread_counts[t]),
-			std::ref(thread_counts_plus[t])
+			std::ref(thread_counts_plus[t]),
+			std::ref(thread_counts_forward[t])
 		);
 
 		current_start = thread_end;
@@ -371,14 +432,16 @@ real_type get_intersecting_line_density(
 	// Aggregate results
 	real_type total_count = 0;
 	real_type total_count_plus = 0;
+	real_type total_count_forward = 0;
 
 	for (unsigned int t = 0; t < num_threads; t++)
 	{
 		total_count += thread_counts[t];
 		total_count_plus += thread_counts_plus[t];
+		total_count_forward += thread_counts_forward[t];
 	}
 
-	return total_count_plus - total_count;
+	return pair<real_type, real_type>(total_count_plus - total_count, total_count_forward - total_count);
 }
 
 int main(int argc, char** argv)
@@ -435,17 +498,18 @@ int main(int argc, char** argv)
 			receiver_distance_geometrized + epsilon;
 
 		// beta function
-		const real_type collision_count_plus_minus_collision_count =
+		const pair<real_type, real_type> collision_count_plus_minus_collision_count =
 			get_intersecting_line_density(
 				static_cast<long long unsigned int>(n_geometrized),
 				emitter_radius_geometrized,
 				receiver_distance_geometrized,
 				receiver_distance_plus_geometrized,
-				receiver_radius_geometrized);
+				receiver_radius_geometrized,
+				epsilon);
 
 		// alpha variable
 		const real_type gradient_integer =
-			collision_count_plus_minus_collision_count
+			collision_count_plus_minus_collision_count.first;
 			/ epsilon;
 
 		// g variable
