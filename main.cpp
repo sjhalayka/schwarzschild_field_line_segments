@@ -138,7 +138,7 @@ real_type intersect(
 
 
 
-	
+
 	real_type tmin = 0, tmax = 0;
 
 	return intersect_AABB(min_location, max_location, location, normal, tmin, tmax);
@@ -249,46 +249,6 @@ void worker_thread(
 
 		vector_3 forward_max_location = aabb_max_location;
 		forward_max_location.z += epsilon;
-
-
-
-		//vector_3 right_min_location = aabb_min_location;
-		//vector_3 right_min_location_plus = aabb_min_location;
-		//right_min_location_plus.x += epsilon;
-
-		//vector_3 right_max_location = aabb_max_location;
-		//vector_3 right_max_location_plus = aabb_max_location;
-		//right_max_location_plus.x += epsilon;
-
-		//vector_3 forward_min_location_plus = aabb_min_location;
-
-		//vector_3 forward_max_location_plus = aabb_max_location;
-		//forward_max_location_plus.z += epsilon;
-
-		//pair<real_type, real_type> p0 =
-		//	intersect(
-		//		location, normal, sideways,
-		//		aabb_min_location, aabb_max_location,
-		//		receiver_radius,
-		//		emitter_radius,
-		//		epsilon);
-
-		//pair<real_type, real_type> p1 =
-		//	intersect(
-		//		location, normal, sideways,
-		//		right_min_location, right_max_location,
-		//		receiver_radius,
-		//		emitter_radius,
-		//		epsilon);
-
-		//pair<real_type, real_type> p2 =
-		//	intersect(
-		//		location, normal, sideways,
-		//		forward_min_location, forward_max_location,
-		//		receiver_radius,
-		//		emitter_radius,
-		//		epsilon);
-
 
 
 
@@ -451,7 +411,7 @@ int main(int argc, char** argv)
 	ofstream outfile_Newton("Newton_analytical");
 
 	const real_type emitter_radius_geometrized =
-		sqrt(1e9 * log(2.0) / pi);
+		sqrt(1e7 * log(2.0) / pi);
 
 	const real_type receiver_radius_geometrized =
 		emitter_radius_geometrized * 0.01; // Minimum one Planck unit
@@ -509,8 +469,8 @@ int main(int argc, char** argv)
 
 		// alpha variable
 		const real_type gradient_integer =
-			collision_count_plus_minus_collision_count.first;
-			/ epsilon;
+			collision_count_plus_minus_collision_count.first
+		/ epsilon;
 
 		// g variable
 		real_type gradient_strength =
