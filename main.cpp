@@ -10,6 +10,9 @@
 std::atomic<long long unsigned int> global_progress(0);
 
 
+
+const real_type spin = 0.0;
+
 // Length of each line segment the ray is broken into
 const real_type segment_length = 1.0;
 
@@ -72,16 +75,20 @@ bool intersect_segment_AABB(
 // that distance can possibly be inside it. It also stops early once the
 // segments have entered and then left the box, because a box is convex and
 // so the colliding segments form one contiguous run.
-real_type intersect_AABB(const vector_3 min_location, const vector_3 max_location, vector_3 ray_origin, vector_3 ray_dir, real_type& tmin, real_type& tmax)
+real_type intersect_AABB(
+	const vector_3 min_location, 
+	const vector_3 max_location, 
+	vector_3 ray_origin, vector_3 ray_dir, 
+	real_type& tmin, real_type& tmax,
+	const real_type emitter_radius,
+	const real_type receiver_distance,
+	const real_type receiver_distance_plus,
+	const real_type receiver_radius)
 {
 	tmin = 0;
 	tmax = 0;
 
-	const real_type fx = max(fabs(min_location.x - ray_origin.x), fabs(max_location.x - ray_origin.x));
-	const real_type fy = max(fabs(min_location.y - ray_origin.y), fabs(max_location.y - ray_origin.y));
-	const real_type fz = max(fabs(min_location.z - ray_origin.z), fabs(max_location.z - ray_origin.z));
-
-	const real_type max_distance = sqrt(fx * fx + fy * fy + fz * fz);
+	const real_type max_distance = receiver_distance + receiver_radius * sqrt(3.0);
 
 	const long long unsigned int segment_count =
 		static_cast<long long unsigned int>(ceil(max_distance / segment_length));
@@ -119,29 +126,23 @@ real_type intersect(
 	const vector_3 normal,
 	const real_type epsilon,
 	const vector_3 min_location,
-	const vector_3 max_location)
+	const vector_3 max_location,
+	const real_type emitter_radius,
+	const real_type receiver_distance,
+	const real_type receiver_distance_plus,
+	const real_type receiver_radius)
 {
-	//const vector_3 circle_origin(receiver_distance, 0, 0);
-
-	//if (normal.dot(circle_origin) <= 0)
-	//	return 0.0;
-
-
-
-
-
-	//vector_3 min_location(-receiver_radius + receiver_distance, -receiver_radius, -receiver_radius);
-	//vector_3 max_location(receiver_radius + receiver_distance, receiver_radius, receiver_radius);
-
-
-
-
-
-
-
 	real_type tmin = 0, tmax = 0;
 
-	return intersect_AABB(min_location, max_location, location, normal, tmin, tmax);
+	return intersect_AABB(
+		min_location, 
+		max_location, 
+		location, normal, 
+		tmin, tmax,
+		emitter_radius,
+		receiver_distance,
+		receiver_distance_plus,
+		receiver_radius);
 }
 
 // Thread-local versions of random functions that take generator and distribution as parameters
@@ -173,6 +174,24 @@ vector_3 random_unit_vector(std::mt19937& local_gen, std::uniform_real_distribut
 	return vector_3(x, y, z).normalize();
 }
 
+vector_3 random_unit_vector_spin(const real_type spin, std::mt19937& local_gen, std::uniform_real_distribution<real_type>& local_dis)
+{
+	const real_type z = local_dis(local_gen) * 2.0 - 1.0;
+	const real_type a = local_dis(local_gen) * 2.0 * pi;
+
+	const real_type r = sqrt(1.0f - z * z);
+	const real_type x = r * cos(a);
+	const real_type y = r * sin(a);
+
+	vector_3 location(x, y, z);
+	location.normalize();
+	location.y *= 1 - spin;
+
+	return location;
+}
+
+
+
 // Worker function for each thread
 void worker_thread(
 	long long unsigned int start_idx,
@@ -202,7 +221,7 @@ void worker_thread(
 
 	for (long long unsigned int i = start_idx; i < end_idx; i++)
 	{
-		vector_3 location = random_unit_vector(local_gen, local_dis);
+		vector_3 location = random_unit_vector_spin(spin, local_gen, local_dis);
 
 		location.x *= emitter_radius;
 		location.y *= emitter_radius;
@@ -222,7 +241,7 @@ void worker_thread(
 		//		surface_normal, local_gen, local_dis);
 
 		// C) Schwarzschild gravitation, quantum
-		vector_3 r = random_unit_vector(local_gen, local_dis);
+		vector_3 r = random_unit_vector_spin(spin, local_gen, local_dis);
 
 		r.x *= emitter_radius;
 		r.y *= emitter_radius;
@@ -254,15 +273,29 @@ void worker_thread(
 
 		local_count += intersect(
 			location, normal,
-			epsilon, aabb_min_location, aabb_max_location);
+			epsilon, aabb_min_location, aabb_max_location,
+			emitter_radius,
+			receiver_distance,
+			receiver_distance_plus,
+			receiver_radius
+			);
 
 		local_count_plus += intersect(
 			location, normal,
-			epsilon, right_min_location, right_max_location);
+			epsilon, right_min_location, right_max_location,
+			emitter_radius,
+			receiver_distance,
+			receiver_distance_plus,
+			receiver_radius		
+		);
 
 		local_count_forward += intersect(
 			location, normal,
-			epsilon, forward_min_location, forward_max_location);
+			epsilon, forward_min_location, forward_max_location,
+			emitter_radius,
+			receiver_distance,
+			receiver_distance_plus,
+			receiver_radius);
 
 
 
