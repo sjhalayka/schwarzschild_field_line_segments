@@ -14,7 +14,7 @@ std::atomic<long long unsigned int> global_progress(0);
 const real_type spin = 0.0;
 
 // Length of each line segment the ray is broken into
-const real_type segment_length = 1.0;
+real_type segment_length = 1.0;
 
 // Slab test for a finite line segment against an axis-aligned bounding box.
 // Returns true when any part of the segment lies inside the box.
@@ -79,44 +79,57 @@ real_type intersect_AABB(
 	const vector_3 min_location, 
 	const vector_3 max_location, 
 	vector_3 ray_origin, vector_3 ray_dir, 
-	real_type& tmin, real_type& tmax,
 	const real_type emitter_radius,
 	const real_type receiver_distance,
 	const real_type receiver_distance_plus,
 	const real_type receiver_radius)
 {
-	tmin = 0;
-	tmax = 0;
+	const real_type max_distance = receiver_distance_plus + receiver_radius * sqrt(3.0);
 
-	const real_type max_distance = receiver_distance + receiver_radius * sqrt(3.0);
+	vector_3 ray = ray_dir * segment_length;
 
-	const long long unsigned int segment_count =
-		static_cast<long long unsigned int>(ceil(max_distance / segment_length));
+	vector_3 segment_start = ray_origin;
+	vector_3 segment_end = ray_origin + ray;
 
 	real_type total_length = 0;
-	bool found_hit = false;
 
-	for (long long unsigned int i = 0; i < segment_count; i++)
+	while (segment_end.length() < max_distance)
 	{
-		const vector_3 segment_start = ray_origin + ray_dir * (i * segment_length);
-		const vector_3 segment_end = ray_origin + ray_dir * ((i + 1) * segment_length);
-
 		if (intersect_segment_AABB(min_location, max_location, segment_start, segment_end))
-		{
-			if (false == found_hit)
-			{
-				tmin = i * segment_length;
-				found_hit = true;
-			}
+			total_length += (segment_end - segment_start).length();
 
-			tmax = (i + 1) * segment_length;
-			total_length += segment_length;
-		}
-		else if (found_hit)
-		{
-			break;
-		}
+		segment_start = segment_end;
+		segment_end += ray;
 	}
+
+
+	//const long long unsigned int segment_count =
+	//	static_cast<long long unsigned int>(ceil(max_distance / segment_length));
+
+	//real_type total_length = 0;
+	//bool found_hit = false;
+
+	//for (long long unsigned int i = 0; i < segment_count; i++)
+	//{
+	//	const vector_3 segment_start = ray_origin + ray_dir * (i * segment_length);
+	//	const vector_3 segment_end = ray_origin + ray_dir * ((i + 1) * segment_length);
+
+	//	if (intersect_segment_AABB(min_location, max_location, segment_start, segment_end))
+	//	{
+	//		if (false == found_hit)
+	//		{
+	//			tmin = i * segment_length;
+	//			found_hit = true;
+	//		}
+
+	//		tmax = (i + 1) * segment_length;
+	//		total_length += segment_length;
+	//	}
+	//	else if (found_hit)
+	//	{
+	//		break;
+	//	}
+	//}
 
 	return total_length;
 }
@@ -132,13 +145,10 @@ real_type intersect(
 	const real_type receiver_distance_plus,
 	const real_type receiver_radius)
 {
-	real_type tmin = 0, tmax = 0;
-
 	return intersect_AABB(
 		min_location, 
 		max_location, 
-		location, normal, 
-		tmin, tmax,
+		location, normal,
 		emitter_radius,
 		receiver_distance,
 		receiver_distance_plus,
@@ -444,7 +454,7 @@ int main(int argc, char** argv)
 	ofstream outfile_Newton("Newton_analytical");
 
 	const real_type emitter_radius_geometrized =
-		sqrt(1e7 * log(2.0) / pi);
+		sqrt(1e9 * log(2.0) / pi);
 
 	const real_type receiver_radius_geometrized =
 		emitter_radius_geometrized * 0.01; // Minimum one Planck unit
@@ -489,6 +499,8 @@ int main(int argc, char** argv)
 
 		const real_type receiver_distance_plus_geometrized =
 			receiver_distance_geometrized + epsilon;
+
+		segment_length = receiver_radius_geometrized / 10.0;// epsilon / 10.0;
 
 		// beta function
 		const pair<real_type, real_type> collision_count_plus_minus_collision_count =
