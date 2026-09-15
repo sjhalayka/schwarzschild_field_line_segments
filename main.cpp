@@ -24,55 +24,70 @@ bool intersect_segment_AABB(
 	const vector_3 segment_start,
 	const vector_3 segment_end)
 {
-	//return
-	//	segment_end.x >= min_location.x &&
-	//	segment_end.x <= max_location.x &&
-	//	segment_end.y >= min_location.y &&
-	//	segment_end.y <= max_location.y &&
-	//	segment_end.z >= min_location.z &&
-	//	segment_end.z <= max_location.z;
 
-	const vector_3 d = segment_end - segment_start;
+	vector_3 segment_mid_point;
+	segment_mid_point.x = (segment_start.x + segment_end.x) * 0.5;
+	segment_mid_point.y = (segment_start.y + segment_end.y) * 0.5;
+	segment_mid_point.z = (segment_start.z + segment_end.z) * 0.5;
 
-	const real_type s[3] = { segment_start.x, segment_start.y, segment_start.z };
-	const real_type dd[3] = { d.x, d.y, d.z };
-	const real_type mn[3] = { min_location.x, min_location.y, min_location.z };
-	const real_type mx[3] = { max_location.x, max_location.y, max_location.z };
 
-	// Segment parameter runs from 0 at the start to 1 at the end
-	real_type t0 = 0.0;
-	real_type t1 = 1.0;
 
-	for (size_t i = 0; i < 3; i++)
-	{
-		if (fabs(dd[i]) < 1e-20)
-		{
-			// Segment is parallel to this pair of slabs
-			if (s[i] < mn[i] || s[i] > mx[i])
-				return false;
 
-			continue;
-		}
+	return
+		segment_mid_point.x >= min_location.x &&
+		segment_mid_point.x <= max_location.x &&
+		segment_mid_point.y >= min_location.y &&
+		segment_mid_point.y <= max_location.y &&
+		segment_mid_point.z >= min_location.z &&
+		segment_mid_point.z <= max_location.z;
 
-		const real_type inv = 1.0 / dd[i];
 
-		real_type ta = (mn[i] - s[i]) * inv;
-		real_type tb = (mx[i] - s[i]) * inv;
 
-		if (ta > tb)
-			swap(ta, tb);
 
-		if (ta > t0)
-			t0 = ta;
 
-		if (tb < t1)
-			t1 = tb;
 
-		if (t0 > t1)
-			return false;
-	}
 
-	return true;
+	//const vector_3 d = segment_end - segment_start;
+
+	//const real_type s[3] = { segment_start.x, segment_start.y, segment_start.z };
+	//const real_type dd[3] = { d.x, d.y, d.z };
+	//const real_type mn[3] = { min_location.x, min_location.y, min_location.z };
+	//const real_type mx[3] = { max_location.x, max_location.y, max_location.z };
+
+	//// Segment parameter runs from 0 at the start to 1 at the end
+	//real_type t0 = 0.0;
+	//real_type t1 = 1.0;
+
+	//for (size_t i = 0; i < 3; i++)
+	//{
+	//	if (fabs(dd[i]) < 1e-20)
+	//	{
+	//		// Segment is parallel to this pair of slabs
+	//		if (s[i] < mn[i] || s[i] > mx[i])
+	//			return false;
+
+	//		continue;
+	//	}
+
+	//	const real_type inv = 1.0 / dd[i];
+
+	//	real_type ta = (mn[i] - s[i]) * inv;
+	//	real_type tb = (mx[i] - s[i]) * inv;
+
+	//	if (ta > tb)
+	//		swap(ta, tb);
+
+	//	if (ta > t0)
+	//		t0 = ta;
+
+	//	if (tb < t1)
+	//		t1 = tb;
+
+	//	if (t0 > t1)
+	//		return false;
+	//}
+
+	//return true;
 }
 
 // Breaks the ray into segments of segment_length and counts how many of
