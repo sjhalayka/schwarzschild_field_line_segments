@@ -24,6 +24,14 @@ bool intersect_segment_AABB(
 	const vector_3 segment_start,
 	const vector_3 segment_end)
 {
+	//return
+	//	segment_end.x >= min_location.x &&
+	//	segment_end.x <= max_location.x &&
+	//	segment_end.y >= min_location.y &&
+	//	segment_end.y <= max_location.y &&
+	//	segment_end.z >= min_location.z &&
+	//	segment_end.z <= max_location.z;
+
 	const vector_3 d = segment_end - segment_start;
 
 	const real_type s[3] = { segment_start.x, segment_start.y, segment_start.z };
