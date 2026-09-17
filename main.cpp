@@ -11,8 +11,6 @@ std::atomic<long long unsigned int> global_progress(0);
 
 
 
-const real_type spin = 0.0;
-
 // Length of each line segment the ray is broken into
 real_type segment_length = 1.0;
 
@@ -99,9 +97,9 @@ bool intersect_segment_AABB(
 // segments have entered and then left the box, because a box is convex and
 // so the colliding segments form one contiguous run.
 real_type intersect_AABB(
-	const vector_3 min_location, 
-	const vector_3 max_location, 
-	vector_3 ray_origin, vector_3 ray_dir, 
+	const vector_3 min_location,
+	const vector_3 max_location,
+	vector_3 ray_origin, vector_3 ray_dir,
 	const real_type emitter_radius,
 	const real_type receiver_distance,
 	const real_type receiver_distance_plus,
@@ -169,8 +167,8 @@ real_type intersect(
 	const real_type receiver_radius)
 {
 	return intersect_AABB(
-		min_location, 
-		max_location, 
+		min_location,
+		max_location,
 		location, normal,
 		emitter_radius,
 		receiver_distance,
@@ -204,21 +202,8 @@ vector_3 random_unit_vector(std::mt19937& local_gen, std::uniform_real_distribut
 	const real_type x = r * cos(a);
 	const real_type y = r * sin(a);
 
-	return vector_3(x, y, z).normalize();
-}
-
-vector_3 random_unit_vector_spin(const real_type spin, std::mt19937& local_gen, std::uniform_real_distribution<real_type>& local_dis)
-{
-	const real_type z = local_dis(local_gen) * 2.0 - 1.0;
-	const real_type a = local_dis(local_gen) * 2.0 * pi;
-
-	const real_type r = sqrt(1.0f - z * z);
-	const real_type x = r * cos(a);
-	const real_type y = r * sin(a);
-
 	vector_3 location(x, y, z);
 	location.normalize();
-	location.y *= 1 - spin;
 
 	return location;
 }
@@ -254,7 +239,7 @@ void worker_thread(
 
 	for (long long unsigned int i = start_idx; i < end_idx; i++)
 	{
-		vector_3 location = random_unit_vector_spin(spin, local_gen, local_dis);
+		vector_3 location = random_unit_vector(local_gen, local_dis);
 
 		location.x *= emitter_radius;
 		location.y *= emitter_radius;
@@ -274,7 +259,7 @@ void worker_thread(
 		//		surface_normal, local_gen, local_dis);
 
 		// C) Schwarzschild gravitation, quantum
-		vector_3 r = random_unit_vector_spin(spin, local_gen, local_dis);
+		vector_3 r = random_unit_vector(local_gen, local_dis);
 
 		r.x *= emitter_radius;
 		r.y *= emitter_radius;
@@ -311,7 +296,7 @@ void worker_thread(
 			receiver_distance,
 			receiver_distance_plus,
 			receiver_radius
-			);
+		);
 
 		local_count_plus += intersect(
 			location, normal,
@@ -319,7 +304,7 @@ void worker_thread(
 			emitter_radius,
 			receiver_distance,
 			receiver_distance_plus,
-			receiver_radius		
+			receiver_radius
 		);
 
 		local_count_forward += intersect(
@@ -476,25 +461,43 @@ int main(int argc, char** argv)
 	ofstream outfile_analytical("Schwarzschild_analytical");
 	ofstream outfile_Newton("Newton_analytical");
 
+
+	const real_type spin = 0.5;
+
+	const real_type n = 1e9;
+
 	const real_type emitter_radius_geometrized =
-		sqrt(1e9 * log(2.0) / pi);
+		sqrt(n * log(2.0) / pi);
+
+	const real_type kerr_root = sqrt(1.0 - spin * spin);
 
 	const real_type receiver_radius_geometrized =
 		emitter_radius_geometrized * 0.01; // Minimum one Planck unit
 
-	const real_type emitter_area_geometrized =
-		4.0 * pi
-		* emitter_radius_geometrized
-		* emitter_radius_geometrized;
-
-	// Field line count
-	const real_type n_geometrized =
-		emitter_area_geometrized
-		/ (log(2.0) * 4.0);
-
 	const real_type emitter_mass_geometrized =
 		emitter_radius_geometrized
-		/ 2.0;
+		/ sqrt(2.0 * (1.0 + kerr_root));
+
+	const real_type emitter_a_geometrized =
+		spin * emitter_mass_geometrized;
+
+	const real_type emitter_J = emitter_a_geometrized * emitter_mass_geometrized;
+
+	const real_type emitter_area_geometrized =
+		4.0 * pi
+		* (emitter_radius_geometrized * emitter_radius_geometrized
+			+ emitter_a_geometrized * emitter_a_geometrized);
+
+	// Field line count
+	//const real_type n_geometrized =
+	//	emitter_area_geometrized
+	//	/ (log(2.0) * 4.0);
+
+
+
+
+
+
 
 	real_type start_pos =
 		emitter_radius_geometrized
@@ -528,7 +531,7 @@ int main(int argc, char** argv)
 		// beta function
 		const pair<real_type, real_type> collision_count_plus_minus_collision_count =
 			get_intersecting_line_density(
-				static_cast<long long unsigned int>(n_geometrized),
+				static_cast<long long unsigned int>(n),
 				emitter_radius_geometrized,
 				receiver_distance_geometrized,
 				receiver_distance_plus_geometrized,
@@ -538,7 +541,7 @@ int main(int argc, char** argv)
 		// alpha variable
 		const real_type gradient_integer =
 			collision_count_plus_minus_collision_count.first
-		/ epsilon;
+			/ epsilon;
 
 		// g variable
 		real_type gradient_strength =
@@ -550,7 +553,7 @@ int main(int argc, char** argv)
 
 		const real_type a_Newton_geometrized =
 			sqrt(
-				n_geometrized * log(2.0)
+				n * log(2.0)
 				/
 				(4.0 * pi *
 					pow(receiver_distance_geometrized, 4.0))
