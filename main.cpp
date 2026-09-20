@@ -461,50 +461,38 @@ int main(int argc, char** argv)
 	ofstream outfile_analytical("Schwarzschild_analytical");
 	ofstream outfile_Newton("Newton_analytical");
 
+	const real_type emitter_mass_geometrized = 1e4;
+	const real_type J = 0;// emitter_mass_geometrized* emitter_mass_geometrized - emitter_mass_geometrized * (emitter_mass_geometrized / 2);
 
-	const real_type spin = 0.5;
-
-	const real_type n = 1e9;
-
-	const real_type emitter_radius_geometrized =
-		sqrt(n * log(2.0) / pi);
+	const real_type emitter_a_geometrized = J / emitter_mass_geometrized;
+	const real_type spin = emitter_a_geometrized / emitter_mass_geometrized;
 
 	const real_type kerr_root = sqrt(1.0 - spin * spin);
 
-	const real_type receiver_radius_geometrized =
-		emitter_radius_geometrized * 0.01; // Minimum one Planck unit
-
-	const real_type emitter_mass_geometrized =
-		emitter_radius_geometrized
-		/ sqrt(2.0 * (1.0 + kerr_root));
-
-	const real_type emitter_a_geometrized =
-		spin * emitter_mass_geometrized;
-
-	const real_type emitter_J = emitter_a_geometrized * emitter_mass_geometrized;
+	const real_type emitter_r_plus_geometrized =
+		emitter_mass_geometrized * (1.0 + kerr_root);
 
 	const real_type emitter_area_geometrized =
 		4.0 * pi
-		* (emitter_radius_geometrized * emitter_radius_geometrized
+		* (emitter_r_plus_geometrized * emitter_r_plus_geometrized
 			+ emitter_a_geometrized * emitter_a_geometrized);
 
+	const real_type receiver_radius_geometrized =
+		emitter_r_plus_geometrized * 0.01; // Minimum one Planck unit
+
+
+
 	// Field line count
-	//const real_type n_geometrized =
-	//	emitter_area_geometrized
-	//	/ (log(2.0) * 4.0);
 
-
-
-
-
-
+	const real_type n_geometrized =
+		emitter_area_geometrized
+		/ (log(2.0) * 4.0);
 
 	real_type start_pos =
-		emitter_radius_geometrized
+		emitter_r_plus_geometrized
 		+ receiver_radius_geometrized;
 
 	real_type end_pos = start_pos * 2.0;
-
 
 	const size_t pos_res = 30; // Minimum 2 steps
 
@@ -514,7 +502,6 @@ int main(int argc, char** argv)
 
 	const real_type epsilon =
 		receiver_radius_geometrized;
-
 
 	for (size_t i = 0; i < pos_res; i++)
 	{
@@ -531,8 +518,8 @@ int main(int argc, char** argv)
 		// beta function
 		const pair<real_type, real_type> collision_count_plus_minus_collision_count =
 			get_intersecting_line_density(
-				static_cast<long long unsigned int>(n),
-				emitter_radius_geometrized,
+				static_cast<long long unsigned int>(n_geometrized),
+				emitter_r_plus_geometrized,
 				receiver_distance_geometrized,
 				receiver_distance_plus_geometrized,
 				receiver_radius_geometrized,
@@ -553,7 +540,7 @@ int main(int argc, char** argv)
 
 		const real_type a_Newton_geometrized =
 			sqrt(
-				n * log(2.0)
+				n_geometrized * log(2.0)
 				/
 				(4.0 * pi *
 					pow(receiver_distance_geometrized, 4.0))
@@ -564,10 +551,10 @@ int main(int argc, char** argv)
 			/ (8.0 * emitter_mass_geometrized);
 
 
-		const real_type dt_Schwarzschild = sqrt(1 - emitter_radius_geometrized / receiver_distance_geometrized);
+		const real_type dt_Schwarzschild = sqrt(1 - emitter_r_plus_geometrized / receiver_distance_geometrized);
 
 		const real_type a_Schwarzschild_geometrized =
-			emitter_radius_geometrized / (pi * pow(receiver_distance_geometrized, 2.0) * dt_Schwarzschild);
+			emitter_r_plus_geometrized / (pi * pow(receiver_distance_geometrized, 2.0) * dt_Schwarzschild);
 
 		cout << "a_Schwarzschild_geometrized " << a_Schwarzschild_geometrized << endl;
 		cout << "a_Newton_geometrized " << a_Newton_geometrized << endl;
