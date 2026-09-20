@@ -465,12 +465,9 @@ int main(int argc, char** argv)
 	const real_type J = 0;// emitter_mass_geometrized* emitter_mass_geometrized - emitter_mass_geometrized * (emitter_mass_geometrized / 2);
 
 	const real_type emitter_a_geometrized = J / emitter_mass_geometrized;
-	const real_type spin = emitter_a_geometrized / emitter_mass_geometrized;
-
-	const real_type kerr_root = sqrt(1.0 - spin * spin);
 
 	const real_type emitter_r_plus_geometrized =
-		emitter_mass_geometrized * (1.0 + kerr_root);
+		emitter_mass_geometrized + sqrt(emitter_mass_geometrized * emitter_mass_geometrized - emitter_a_geometrized* emitter_a_geometrized);
 
 	const real_type emitter_area_geometrized =
 		4.0 * pi
