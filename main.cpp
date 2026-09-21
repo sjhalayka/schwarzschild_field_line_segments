@@ -479,7 +479,7 @@ int main(int argc, char** argv)
 		emitter_mass_geometrized * (1.0 + spin_root);
 
 	const real_type emitter_area_geometrized =
-		4.0 * n_geometrized * log(2.0);   // exact inverse of n = A / (4 ln2)
+		4.0 * n_geometrized * log(2.0);
 
 	//const real_type J = emitter_a_geometrized * emitter_mass_geometrized;
 
