@@ -22,14 +22,10 @@ bool intersect_segment_AABB(
 	const vector_3 segment_start,
 	const vector_3 segment_end)
 {
-
 	vector_3 segment_mid_point;
 	segment_mid_point.x = (segment_start.x + segment_end.x) * 0.5;
 	segment_mid_point.y = (segment_start.y + segment_end.y) * 0.5;
 	segment_mid_point.z = (segment_start.z + segment_end.z) * 0.5;
-
-
-
 
 	return
 		segment_mid_point.x >= min_location.x &&
@@ -38,64 +34,8 @@ bool intersect_segment_AABB(
 		segment_mid_point.y <= max_location.y &&
 		segment_mid_point.z >= min_location.z &&
 		segment_mid_point.z <= max_location.z;
-
-
-
-
-
-
-
-	//const vector_3 d = segment_end - segment_start;
-
-	//const real_type s[3] = { segment_start.x, segment_start.y, segment_start.z };
-	//const real_type dd[3] = { d.x, d.y, d.z };
-	//const real_type mn[3] = { min_location.x, min_location.y, min_location.z };
-	//const real_type mx[3] = { max_location.x, max_location.y, max_location.z };
-
-	//// Segment parameter runs from 0 at the start to 1 at the end
-	//real_type t0 = 0.0;
-	//real_type t1 = 1.0;
-
-	//for (size_t i = 0; i < 3; i++)
-	//{
-	//	if (fabs(dd[i]) < 1e-20)
-	//	{
-	//		// Segment is parallel to this pair of slabs
-	//		if (s[i] < mn[i] || s[i] > mx[i])
-	//			return false;
-
-	//		continue;
-	//	}
-
-	//	const real_type inv = 1.0 / dd[i];
-
-	//	real_type ta = (mn[i] - s[i]) * inv;
-	//	real_type tb = (mx[i] - s[i]) * inv;
-
-	//	if (ta > tb)
-	//		swap(ta, tb);
-
-	//	if (ta > t0)
-	//		t0 = ta;
-
-	//	if (tb < t1)
-	//		t1 = tb;
-
-	//	if (t0 > t1)
-	//		return false;
-	//}
-
-	//return true;
 }
 
-// Breaks the ray into segments of segment_length and counts how many of
-// those segments collide with the box. Every segment is tested directly --
-// there is no line-box test anywhere in here.
-//
-// The march stops at the farthest corner of the box, since no point beyond
-// that distance can possibly be inside it. It also stops early once the
-// segments have entered and then left the box, because a box is convex and
-// so the colliding segments form one contiguous run.
 real_type intersect_AABB(
 	const vector_3 min_location,
 	const vector_3 max_location,
@@ -122,35 +62,6 @@ real_type intersect_AABB(
 		segment_start = segment_end;
 		segment_end += ray;
 	}
-
-
-	//const long long unsigned int segment_count =
-	//	static_cast<long long unsigned int>(ceil(max_distance / segment_length));
-
-	//real_type total_length = 0;
-	//bool found_hit = false;
-
-	//for (long long unsigned int i = 0; i < segment_count; i++)
-	//{
-	//	const vector_3 segment_start = ray_origin + ray_dir * (i * segment_length);
-	//	const vector_3 segment_end = ray_origin + ray_dir * ((i + 1) * segment_length);
-
-	//	if (intersect_segment_AABB(min_location, max_location, segment_start, segment_end))
-	//	{
-	//		if (false == found_hit)
-	//		{
-	//			tmin = i * segment_length;
-	//			found_hit = true;
-	//		}
-
-	//		tmax = (i + 1) * segment_length;
-	//		total_length += segment_length;
-	//	}
-	//	else if (found_hit)
-	//	{
-	//		break;
-	//	}
-	//}
 
 	return total_length;
 }
