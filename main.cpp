@@ -461,29 +461,34 @@ int main(int argc, char** argv)
 	ofstream outfile_analytical("Schwarzschild_analytical");
 	ofstream outfile_Newton("Newton_analytical");
 
-	const real_type emitter_mass_geometrized = 1e4;
-	const real_type J = 0;// emitter_mass_geometrized* emitter_mass_geometrized - emitter_mass_geometrized * (emitter_mass_geometrized / 2);
 
-	const real_type emitter_a_geometrized = J / emitter_mass_geometrized;
+
+	const real_type n_geometrized = 1e9; // field line count
+	const real_type spin = 0.5; // a_*
+
+	// --- derived ---
+	const real_type spin_root = sqrt(1.0 - spin * spin);
+
+	const real_type emitter_mass_geometrized =
+		sqrt(n_geometrized * log(2.0) / (2.0 * pi * (1.0 + spin_root)));
+
+	const real_type emitter_a_geometrized =
+		spin * emitter_mass_geometrized;
 
 	const real_type emitter_r_plus_geometrized =
-		emitter_mass_geometrized + sqrt(emitter_mass_geometrized * emitter_mass_geometrized - emitter_a_geometrized* emitter_a_geometrized);
+		emitter_mass_geometrized * (1.0 + spin_root);
 
 	const real_type emitter_area_geometrized =
-		4.0 * pi
-		* (emitter_r_plus_geometrized * emitter_r_plus_geometrized
-			+ emitter_a_geometrized * emitter_a_geometrized);
+		4.0 * n_geometrized * log(2.0);   // exact inverse of n = A / (4 ln2)
+
+	//const real_type J = emitter_a_geometrized * emitter_mass_geometrized;
+
+
 
 	const real_type receiver_radius_geometrized =
 		emitter_r_plus_geometrized * 0.01; // Minimum one Planck unit
 
 
-
-	// Field line count
-
-	const real_type n_geometrized =
-		emitter_area_geometrized
-		/ (log(2.0) * 4.0);
 
 	real_type start_pos =
 		emitter_r_plus_geometrized
