@@ -473,17 +473,13 @@ int main(int argc, char** argv)
 		sqrt(n_geometrized * log(2.0) / (2.0 * pi * (1.0 + spin_root)));
 
 	const real_type emitter_a_geometrized =
-		spin * emitter_mass_geometrized;
+		sqrt(n_geometrized * log(2.0) * (1.0 - spin_root) / (2.0 * pi));
 
 	const real_type emitter_r_plus_geometrized =
-		emitter_mass_geometrized * (1.0 + spin_root);
+		sqrt(n_geometrized * log(2.0) * (1.0 + spin_root) / (2.0 * pi));
 
 	const real_type emitter_area_geometrized =
 		4.0 * n_geometrized * log(2.0);
-
-	//const real_type J = emitter_a_geometrized * emitter_mass_geometrized;
-
-
 
 	const real_type receiver_radius_geometrized =
 		emitter_r_plus_geometrized * 0.01; // Minimum one Planck unit
