@@ -481,6 +481,8 @@ int main(int argc, char** argv)
 	const real_type emitter_area_geometrized =
 		4.0 * n_geometrized * log(2.0);
 
+
+
 	const real_type receiver_radius_geometrized =
 		emitter_r_plus_geometrized * 0.01; // Minimum one Planck unit
 
