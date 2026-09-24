@@ -14,11 +14,86 @@ std::atomic<long long unsigned int> global_progress(0);
 // Length of each line segment the ray is broken into
 real_type segment_length = 1.0;
 
-// Slab test for a finite line segment against an axis-aligned bounding box.
-// Returns true when any part of the segment lies inside the box.
-bool intersect_segment_AABB(
-	const vector_3 min_location,
-	const vector_3 max_location,
+// Oriented bounding box.
+// The box is centred on 'center'; its three local axes are orthonormal and
+// 'half_extent' gives the half-size of the box along each local axis
+// (half_extent.x along axis[0], .y along axis[1], .z along axis[2]).
+struct OBB
+{
+	vector_3 center;
+	vector_3 axis[3];
+	vector_3 half_extent;
+};
+
+inline real_type dot3(const vector_3& a, const vector_3& b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+// Spherical unit vectors at the angles (theta, phi):
+//   theta: polar angle measured from +z
+//   phi:   azimuthal (equatorial) angle measured from +x toward +y
+//
+//   r_hat     = ( sin(t)cos(p),  sin(t)sin(p),  cos(t) )
+//   theta_hat = ( cos(t)cos(p),  cos(t)sin(p), -sin(t) )
+//   phi_hat   = (      -sin(p),        cos(p),       0 )
+//
+// (r_hat, theta_hat, phi_hat) is orthonormal and right-handed:
+// r_hat x theta_hat = phi_hat.
+void spherical_basis(
+	const real_type theta,
+	const real_type phi,
+	vector_3& r_hat,
+	vector_3& theta_hat,
+	vector_3& phi_hat)
+{
+	const real_type st = sin(theta), ct = cos(theta);
+	const real_type sp = sin(phi), cp = cos(phi);
+
+	r_hat = vector_3(st * cp, st * sp, ct);
+	theta_hat = vector_3(ct * cp, ct * sp, -st);
+	phi_hat = vector_3(-sp, cp, 0.0);
+}
+
+// Build an OBB entirely from spherical coordinates (r, theta, phi).
+//
+// Position: the centre sits at the point (r, theta, phi),
+//   center = r * r_hat(theta, phi).
+//
+// Orientation: the box's local axes are the spherical unit vectors at that
+// same point, so the box always faces the origin:
+//   axis[0] = r_hat      (radial,     half-size half_extent.x)
+//   axis[1] = theta_hat  (polar,      half-size half_extent.y)
+//   axis[2] = phi_hat    (azimuthal,  half-size half_extent.z)
+//
+// With theta = pi/2 and phi = 0 the centre is (r, 0, 0) and the axes are
+// +x, -z, +y. For a cube (equal half-extents) this is exactly the original
+// axis-aligned box.
+OBB make_OBB_spherical(
+	const real_type r,
+	const real_type theta,
+	const real_type phi,
+	const vector_3 half_extent)
+{
+	vector_3 r_hat, theta_hat, phi_hat;
+	spherical_basis(theta, phi, r_hat, theta_hat, phi_hat);
+
+	OBB box;
+	box.center = r_hat * r;
+	box.half_extent = half_extent;
+	box.axis[0] = r_hat;
+	box.axis[1] = theta_hat;
+	box.axis[2] = phi_hat;
+
+	return box;
+}
+
+// Test a finite line segment against an oriented bounding box.
+// As in the original AABB version, the segment counts as inside when its
+// midpoint lies inside the box. The midpoint is projected onto each of the
+// box's local axes and compared with the half-extent along that axis.
+bool intersect_segment_OBB(
+	const OBB& box,
 	const vector_3 segment_start,
 	const vector_3 segment_end)
 {
@@ -27,25 +102,26 @@ bool intersect_segment_AABB(
 	segment_mid_point.y = (segment_start.y + segment_end.y) * 0.5;
 	segment_mid_point.z = (segment_start.z + segment_end.z) * 0.5;
 
+	const vector_3 d = segment_mid_point - box.center;
+
 	return
-		segment_mid_point.x >= min_location.x &&
-		segment_mid_point.x <= max_location.x &&
-		segment_mid_point.y >= min_location.y &&
-		segment_mid_point.y <= max_location.y &&
-		segment_mid_point.z >= min_location.z &&
-		segment_mid_point.z <= max_location.z;
+		fabs(dot3(d, box.axis[0])) <= box.half_extent.x &&
+		fabs(dot3(d, box.axis[1])) <= box.half_extent.y &&
+		fabs(dot3(d, box.axis[2])) <= box.half_extent.z;
 }
 
-real_type intersect_AABB(
-	const vector_3 min_location,
-	const vector_3 max_location,
+real_type intersect_OBB(
+	const OBB& box,
 	vector_3 ray_origin, vector_3 ray_dir,
 	const real_type emitter_radius,
-	const real_type receiver_distance,
-	const real_type receiver_distance_plus,
-	const real_type receiver_radius)
+	real_type emitter_spin_a, real_type emitter_mass)
 {
-	const real_type max_distance = receiver_distance_plus + receiver_radius * sqrt(3.0);
+	// No point of the box is farther from the origin than
+	// |center| + |half-extent diagonal|, whatever the orientation.
+	// One extra segment length ensures a segment whose midpoint is still
+	// inside the box is never cut off by the loop condition.
+	const real_type max_distance =
+		box.center.length() + box.half_extent.length() * sqrt(3);// +segment_length;
 
 	vector_3 ray = ray_dir * segment_length;
 
@@ -56,7 +132,7 @@ real_type intersect_AABB(
 
 	while (segment_end.length() < max_distance)
 	{
-		if (intersect_segment_AABB(min_location, max_location, segment_start, segment_end))
+		if (intersect_segment_OBB(box, segment_start, segment_end))
 			total_length += (segment_end - segment_start).length();
 
 		segment_start = segment_end;
@@ -66,25 +142,20 @@ real_type intersect_AABB(
 	return total_length;
 }
 
+
+
 real_type intersect(
 	const vector_3 location,
 	const vector_3 normal,
-	const real_type epsilon,
-	const vector_3 min_location,
-	const vector_3 max_location,
+	const OBB& box,
 	const real_type emitter_radius,
-	const real_type receiver_distance,
-	const real_type receiver_distance_plus,
-	const real_type receiver_radius)
+	real_type emitter_spin_a, real_type emitter_mass)
 {
-	return intersect_AABB(
-		min_location,
-		max_location,
+	return intersect_OBB(
+		box,
 		location, normal,
 		emitter_radius,
-		receiver_distance,
-		receiver_distance_plus,
-		receiver_radius);
+		emitter_spin_a, emitter_mass);
 }
 
 // Thread-local versions of random functions that take generator and distribution as parameters
@@ -128,9 +199,13 @@ void worker_thread(
 	unsigned int thread_seed,
 	const real_type emitter_radius,
 	const real_type receiver_distance,
-	const real_type receiver_distance_plus,
+	//const real_type receiver_distance_plus,
 	const real_type receiver_radius,
 	const real_type epsilon,
+	const real_type emitter_spin_a,
+	const real_type emitter_mass,
+	const real_type receiver_theta,
+	const real_type receiver_phi,
 	real_type& result_count,
 	real_type& result_count_plus,
 	real_type& result_count_forward)
@@ -147,6 +222,30 @@ void worker_thread(
 	// Update progress every N iterations to reduce atomic overhead
 	const long long unsigned int progress_update_interval = 10000;
 	long long unsigned int local_progress = 0;
+
+	// Receiver boxes, all defined in spherical coordinates (r, theta, phi).
+	// They do not change between iterations, so they are built once per thread.
+	// Each box is centred at its (r, theta, phi) point and oriented along the
+	// local spherical axes there (see make_OBB_spherical).
+	const vector_3 receiver_half_extent(receiver_radius, receiver_radius, receiver_radius);
+
+	const OBB receiver_box =
+		make_OBB_spherical(receiver_distance, receiver_theta, receiver_phi, receiver_half_extent);
+
+	// Radial finite difference: step r by epsilon.
+	const OBB right_box =
+		make_OBB_spherical(receiver_distance + epsilon, receiver_theta, receiver_phi, receiver_half_extent);
+
+	// Sideways (azimuthal) finite difference: step phi so that the centre moves
+	// an arc length of epsilon along phi_hat, keeping r and theta fixed.
+	// The box stays at distance receiver_distance and re-orients to the new
+	// local spherical axes. (At the poles, sin(theta) = 0 and phi is undefined,
+	// so fall back to a step in theta.)
+	const real_type sin_theta = sin(receiver_theta);
+
+	const real_type dphi = epsilon;// / (receiver_distance * 10);
+	const OBB forward_box =
+		make_OBB_spherical(receiver_distance, receiver_theta, receiver_phi + dphi, receiver_half_extent);
 
 	for (long long unsigned int i = start_idx; i < end_idx; i++)
 	{
@@ -182,51 +281,23 @@ void worker_thread(
 
 
 
-		vector_3 aabb_min_location(-receiver_radius + receiver_distance, -receiver_radius, -receiver_radius);
-		vector_3 aabb_max_location(receiver_radius + receiver_distance, receiver_radius, receiver_radius);
-
-
-		vector_3 right_min_location = aabb_min_location;
-		right_min_location.x += epsilon;
-
-		vector_3 right_max_location = aabb_max_location;
-		right_max_location.x += epsilon;
-
-		vector_3 forward_min_location = aabb_min_location;
-		forward_min_location.z += epsilon;
-
-		vector_3 forward_max_location = aabb_max_location;
-		forward_max_location.z += epsilon;
-
-
-
 		local_count += intersect(
 			location, normal,
-			epsilon, aabb_min_location, aabb_max_location,
+			receiver_box,
 			emitter_radius,
-			receiver_distance,
-			receiver_distance_plus,
-			receiver_radius
-		);
+			emitter_spin_a, emitter_mass);
 
 		local_count_plus += intersect(
 			location, normal,
-			epsilon, right_min_location, right_max_location,
+			right_box,
 			emitter_radius,
-			receiver_distance,
-			receiver_distance_plus,
-			receiver_radius
-		);
+			emitter_spin_a, emitter_mass);
 
 		local_count_forward += intersect(
 			location, normal,
-			epsilon, forward_min_location, forward_max_location,
+			forward_box,
 			emitter_radius,
-			receiver_distance,
-			receiver_distance_plus,
-			receiver_radius);
-
-
+			emitter_spin_a, emitter_mass);
 
 
 		// Update global progress periodically
@@ -283,9 +354,13 @@ pair<real_type, real_type> get_intersecting_line_density(
 	const long long unsigned int n,
 	const real_type emitter_radius,
 	const real_type receiver_distance,
-	const real_type receiver_distance_plus,
+	//const real_type receiver_distance_plus,
 	const real_type receiver_radius,
-	const real_type epsilon)
+	const real_type epsilon,
+	const real_type emitter_spin_a,
+	const real_type emitter_mass,
+	const real_type receiver_theta,
+	const real_type receiver_phi)
 {
 	// Reset global progress counter
 	global_progress.store(0, std::memory_order_relaxed);
@@ -313,6 +388,8 @@ pair<real_type, real_type> get_intersecting_line_density(
 
 	long long unsigned int current_start = 0;
 
+	unsigned start_time = (unsigned)time(0);
+
 	for (unsigned int t = 0; t < num_threads; t++)
 	{
 		long long unsigned int thread_iterations = iterations_per_thread;
@@ -321,7 +398,7 @@ pair<real_type, real_type> get_intersecting_line_density(
 		long long unsigned int thread_end = current_start + thread_iterations;
 
 		// Each thread gets a different seed based on thread index
-		unsigned int thread_seed = t;
+		unsigned int thread_seed = t + start_time;
 
 		threads.emplace_back(
 			worker_thread,
@@ -330,9 +407,13 @@ pair<real_type, real_type> get_intersecting_line_density(
 			thread_seed,
 			emitter_radius,
 			receiver_distance,
-			receiver_distance_plus,
+			//receiver_distance_plus,
 			receiver_radius,
 			epsilon,
+			emitter_spin_a,
+			emitter_mass,
+			receiver_theta,
+			receiver_phi,
 			std::ref(thread_counts[t]),
 			std::ref(thread_counts_plus[t]),
 			std::ref(thread_counts_forward[t])
@@ -366,6 +447,10 @@ pair<real_type, real_type> get_intersecting_line_density(
 	return pair<real_type, real_type>(total_count_plus - total_count, total_count_forward - total_count);
 }
 
+
+
+
+
 int main(int argc, char** argv)
 {
 	ofstream outfile_numerical("Schwarzschild_numerical");
@@ -375,7 +460,7 @@ int main(int argc, char** argv)
 
 
 	const real_type n_geometrized = 1e9; // field line count
-	const real_type spin = 0.5; // a_*
+	const real_type spin = 0.0; // a*
 
 	// --- derived ---
 	const real_type spin_root = sqrt(1.0 - spin * spin);
@@ -414,6 +499,15 @@ int main(int argc, char** argv)
 	const real_type epsilon =
 		receiver_radius_geometrized;
 
+	// Receiver box angular position (radians); the radius is receiver_distance.
+	// theta: polar angle from +z; phi: equatorial angle from +x toward +y.
+	// The box is centred at (receiver_distance, theta, phi) and oriented along
+	// the local spherical axes there.
+	// theta = pi/2, phi = 0 places it at (receiver_distance, 0, 0), matching
+	// the original axis-aligned box.
+	const real_type receiver_theta = pi / 2.0;
+	const real_type receiver_phi = 0.0;
+
 	for (size_t i = 0; i < pos_res; i++)
 	{
 		cout << "\n=== Step " << (i + 1) << " of " << pos_res << " ===" << endl;
@@ -421,8 +515,8 @@ int main(int argc, char** argv)
 		const real_type receiver_distance_geometrized =
 			start_pos + i * pos_step_size;
 
-		const real_type receiver_distance_plus_geometrized =
-			receiver_distance_geometrized + epsilon;
+		//const real_type receiver_distance_plus_geometrized =
+		//	receiver_distance_geometrized + epsilon;
 
 		segment_length = receiver_radius_geometrized / 10.0;// epsilon / 10.0;
 
@@ -432,14 +526,22 @@ int main(int argc, char** argv)
 				static_cast<long long unsigned int>(n_geometrized),
 				emitter_r_plus_geometrized,
 				receiver_distance_geometrized,
-				receiver_distance_plus_geometrized,
+				//receiver_distance_plus_geometrized,
 				receiver_radius_geometrized,
-				epsilon);
+				epsilon,
+				emitter_a_geometrized,
+				emitter_mass_geometrized,
+				receiver_theta,
+				receiver_phi);
 
 		// alpha variable
 		const real_type gradient_integer =
 			collision_count_plus_minus_collision_count.first
 			/ epsilon;
+
+		const real_type gradient_integer_sideways =
+			collision_count_plus_minus_collision_count.second
+			/ (epsilon);
 
 		// g variable
 		real_type gradient_strength =
@@ -449,6 +551,23 @@ int main(int argc, char** argv)
 				* receiver_radius_geometrized
 				* receiver_radius_geometrized);
 
+		real_type gradient_strength_sideways =
+			-gradient_integer_sideways
+			/
+			(2.0 * receiver_radius_geometrized
+				* receiver_radius_geometrized
+				* receiver_radius_geometrized);
+
+		const real_type a_flat_geometrized =
+			gradient_strength * receiver_distance_geometrized * log(2)
+			/ (8.0 * emitter_mass_geometrized);
+
+		const real_type a_flat_geometrized_sideways =
+			gradient_strength_sideways * receiver_distance_geometrized * log(2)
+			/ (8.0 * emitter_mass_geometrized);
+
+
+
 		const real_type a_Newton_geometrized =
 			sqrt(
 				n_geometrized * log(2.0)
@@ -457,21 +576,27 @@ int main(int argc, char** argv)
 					pow(receiver_distance_geometrized, 4.0))
 			);
 
-		const real_type a_flat_geometrized =
-			gradient_strength * receiver_distance_geometrized * log(2)
-			/ (8.0 * emitter_mass_geometrized);
-
-
 		const real_type dt_Schwarzschild = sqrt(1 - emitter_r_plus_geometrized / receiver_distance_geometrized);
 
 		const real_type a_Schwarzschild_geometrized =
 			emitter_r_plus_geometrized / (pi * pow(receiver_distance_geometrized, 2.0) * dt_Schwarzschild);
 
+
+
 		cout << "a_Schwarzschild_geometrized " << a_Schwarzschild_geometrized << endl;
 		cout << "a_Newton_geometrized " << a_Newton_geometrized << endl;
 		cout << "a_flat_geometrized " << a_flat_geometrized << endl;
+		cout << "a_flat_geometrized_sideways " << a_flat_geometrized_sideways << endl;
+
 		cout << a_Schwarzschild_geometrized / a_flat_geometrized << endl;
 		cout << endl;
+
+		cout << a_Schwarzschild_geometrized / a_flat_geometrized_sideways << endl;
+		cout << endl;
+
+		cout << a_Schwarzschild_geometrized / a_flat_geometrized + a_Schwarzschild_geometrized / a_flat_geometrized_sideways << endl;
+		cout << endl;
+
 		cout << a_Newton_geometrized / a_flat_geometrized << endl;
 		cout << endl << endl;
 
