@@ -166,7 +166,7 @@ void make_receiver_boxes(
 
 	// Same orientation, shifted by epsilon along world +x and world +z
 	right_box = translate_OBB(receiver_box, vector_3(epsilon, 0.0, 0.0));
-//	forward_box = translate_OBB(receiver_box, vector_3(0.0, 0.0, epsilon));
+	//	forward_box = translate_OBB(receiver_box, vector_3(0.0, 0.0, epsilon));
 	forward_box = make_radial_OBB(
 		receiver_distance,
 		0.5 * pi,
@@ -220,6 +220,54 @@ void publish_simulation_finished()
 
 
 
+// ---------------------------------------------------------------------------
+// Field line capture for the visualisation
+//
+// intersect_OBB records the first max_recorded_field_lines field lines it
+// traces (from the ray origin on the emitter surface to where the march
+// stopped). The set is cleared at the start of every
+// get_intersecting_line_density call, so it always holds the lines of the
+// current simulation step. Only calls made with record_field_line = true are captured, so a
+// field line that is traced against several boxes is stored only once.
+// ---------------------------------------------------------------------------
+const size_t max_recorded_field_lines = 10000;
+
+struct field_line
+{
+	vector_3 start, end;
+};
+
+std::mutex field_line_mutex;
+vector<field_line> recorded_field_lines;             // guarded by field_line_mutex
+std::atomic<size_t> recorded_field_line_count(0);    // lock-free early-out for the hot loop
+size_t recorded_field_line_generation = 0;           // bumped on every clear; guarded by field_line_mutex
+
+// Discards the previously recorded field lines so the next batch starts empty
+void clear_recorded_field_lines()
+{
+	std::lock_guard<std::mutex> lock(field_line_mutex);
+	recorded_field_lines.clear();
+	recorded_field_line_count.store(0, std::memory_order_relaxed);
+	recorded_field_line_generation++;
+}
+
+void record_field_line(const vector_3& start, const vector_3& end)
+{
+	// Cheap check first, so the worker threads never touch the mutex once full
+	if (recorded_field_line_count.load(std::memory_order_relaxed) >= max_recorded_field_lines)
+		return;
+
+	std::lock_guard<std::mutex> lock(field_line_mutex);
+
+	if (recorded_field_lines.size() >= max_recorded_field_lines)
+		return;
+
+	recorded_field_lines.push_back({ start, end });
+	recorded_field_line_count.store(recorded_field_lines.size(), std::memory_order_relaxed);
+}
+
+
+
 // Point-in-box test for a finite line segment against an oriented bounding box.
 // Returns true when the segment's midpoint lies inside the box.
 bool intersect_segment_OBB(
@@ -243,7 +291,8 @@ bool intersect_segment_OBB(
 
 real_type intersect_OBB(
 	const OBB& box,
-	vector_3 ray_origin, vector_3 ray_dir)
+	vector_3 ray_origin, vector_3 ray_dir,
+	const bool record_this_field_line = false)
 {
 	// No point of the box is farther from the origin than bounding_radius;
 	// one extra segment of margin covers segments that straddle that sphere.
@@ -265,15 +314,20 @@ real_type intersect_OBB(
 		segment_end += ray;
 	}
 
+	// segment_start is now the end of the last segment that was tested
+	if (record_this_field_line)
+		record_field_line(ray_origin, segment_start);
+
 	return total_length;
 }
 
 real_type intersect(
 	const vector_3 location,
 	const vector_3 normal,
-	const OBB& box)
+	const OBB& box,
+	const bool record_this_field_line = false)
 {
-	return intersect_OBB(box, location, normal);
+	return intersect_OBB(box, location, normal, record_this_field_line);
 }
 
 // Thread-local versions of random functions that take generator and distribution as parameters
@@ -373,7 +427,8 @@ void worker_thread(
 
 
 
-		local_count += intersect(location, normal, receiver_box);
+		// The same field line is traced against all three boxes; record it once
+		local_count += intersect(location, normal, receiver_box, true);
 		local_count_plus += intersect(location, normal, right_box);
 		local_count_forward += intersect(location, normal, forward_box);
 
@@ -443,6 +498,10 @@ pair<real_type, real_type> get_intersecting_line_density(
 {
 	// Reset global progress counter
 	global_progress.store(0, std::memory_order_relaxed);
+
+	// Start a fresh set of recorded field lines for this call
+	// (done before any worker thread is launched)
+	clear_recorded_field_lines();
 
 	// Get number of hardware threads
 	unsigned int num_threads = std::thread::hardware_concurrency();
@@ -530,7 +589,7 @@ void run_simulation()
 
 
 
-	const real_type n_geometrized = 1e12; // field line count
+	const real_type n_geometrized = 1e7; // field line count
 	const real_type spin = 0.0; // a_*
 
 	// --- derived ---
@@ -708,6 +767,8 @@ void run_simulation()
 //   f            toggle translucent box faces
 //   e            toggle emitter (horizon) wireframe
 //   a            toggle axes (x red, y green, z blue) at the receiver centre
+//   l            toggle field lines (first 1000 traced by intersect_OBB)
+//   [ / ]        make the field line cylinders thinner / thicker
 //   r            reset camera
 //   Esc          quit (also stops the simulation)
 //
@@ -807,6 +868,24 @@ GLuint viz_dynamic_vao = 0, viz_dynamic_vbo = 0; // re-uploaded every frame (box
 GLuint viz_sphere_vao = 0, viz_sphere_vbo = 0;   // built once (emitter wireframe)
 GLsizei viz_sphere_vertex_count = 0;
 
+// Field line cylinders: separate lit program, interleaved position + normal
+GLuint viz_lit_program = 0;
+GLint viz_lit_mvp_location = -1;
+GLint viz_lit_color_location = -1;
+GLint viz_lit_light_dir_location = -1;
+
+GLuint viz_cylinder_vao = 0, viz_cylinder_vbo = 0;
+GLsizei viz_cylinder_vertex_count = 0;
+
+// What the cylinder buffer was last built from (rebuilt when any of these change)
+size_t viz_cylinder_built_count = 0;
+size_t viz_cylinder_built_generation = static_cast<size_t>(-1);
+vector_3 viz_cylinder_built_origin;
+float viz_cylinder_built_radius = -1.0f;
+
+const int viz_cylinder_sides = 8;
+float viz_field_line_radius_scale = 0.02f; // cylinder radius as a fraction of the receiver box size
+
 // --- Window / camera / UI state ---
 int viz_window_width = 1280;
 int viz_window_height = 720;
@@ -826,6 +905,7 @@ int viz_last_mouse_x = 0, viz_last_mouse_y = 0;
 bool viz_show_faces = true;
 bool viz_show_emitter = true;
 bool viz_show_axes = true;
+bool viz_show_field_lines = true;
 
 std::string viz_last_title;
 
@@ -851,6 +931,33 @@ void main()
 }
 )";
 
+// Headlight-shaded cylinders; abs() makes the shading two-sided
+const char* viz_lit_vertex_shader_source = R"(
+#version 400 core
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+uniform mat4 mvp;
+out vec3 v_normal;
+void main()
+{
+	v_normal = normal;
+	gl_Position = mvp * vec4(position, 1.0);
+}
+)";
+
+const char* viz_lit_fragment_shader_source = R"(
+#version 400 core
+uniform vec4 color;
+uniform vec3 light_dir;
+in vec3 v_normal;
+out vec4 frag_color;
+void main()
+{
+	float diffuse = abs(dot(normalize(v_normal), light_dir));
+	frag_color = vec4(color.rgb * (0.3 + 0.7 * diffuse), color.a);
+}
+)";
+
 GLuint viz_compile_shader(const GLenum type, const char* source)
 {
 	GLuint shader = glCreateShader(type);
@@ -872,31 +979,47 @@ GLuint viz_compile_shader(const GLenum type, const char* source)
 	return shader;
 }
 
-bool viz_init_gl()
+GLuint viz_link_program(const char* vertex_source, const char* fragment_source)
 {
-	const GLuint vs = viz_compile_shader(GL_VERTEX_SHADER, viz_vertex_shader_source);
-	const GLuint fs = viz_compile_shader(GL_FRAGMENT_SHADER, viz_fragment_shader_source);
+	const GLuint vs = viz_compile_shader(GL_VERTEX_SHADER, vertex_source);
+	const GLuint fs = viz_compile_shader(GL_FRAGMENT_SHADER, fragment_source);
 
 	if (vs == 0 || fs == 0)
-		return false;
+		return 0;
 
-	viz_program = glCreateProgram();
-	glAttachShader(viz_program, vs);
-	glAttachShader(viz_program, fs);
-	glLinkProgram(viz_program);
+	GLuint program = glCreateProgram();
+	glAttachShader(program, vs);
+	glAttachShader(program, fs);
+	glLinkProgram(program);
 	glDeleteShader(vs);
 	glDeleteShader(fs);
 
 	GLint ok = GL_FALSE;
-	glGetProgramiv(viz_program, GL_LINK_STATUS, &ok);
+	glGetProgramiv(program, GL_LINK_STATUS, &ok);
 
 	if (!ok)
 	{
 		char log[2048];
-		glGetProgramInfoLog(viz_program, sizeof(log), nullptr, log);
+		glGetProgramInfoLog(program, sizeof(log), nullptr, log);
 		cout << "Program link error:\n" << log << endl;
-		return false;
+		glDeleteProgram(program);
+		return 0;
 	}
+
+	return program;
+}
+
+bool viz_init_gl()
+{
+	viz_program = viz_link_program(viz_vertex_shader_source, viz_fragment_shader_source);
+	viz_lit_program = viz_link_program(viz_lit_vertex_shader_source, viz_lit_fragment_shader_source);
+
+	if (viz_program == 0 || viz_lit_program == 0)
+		return false;
+
+	viz_lit_mvp_location = glGetUniformLocation(viz_lit_program, "mvp");
+	viz_lit_color_location = glGetUniformLocation(viz_lit_program, "color");
+	viz_lit_light_dir_location = glGetUniformLocation(viz_lit_program, "light_dir");
 
 	viz_mvp_location = glGetUniformLocation(viz_program, "mvp");
 	viz_color_location = glGetUniformLocation(viz_program, "color");
@@ -916,6 +1039,16 @@ bool viz_init_gl()
 	glBindBuffer(GL_ARRAY_BUFFER, viz_sphere_vbo);
 	glEnableVertexAttribArray(0);
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+
+	// Field line cylinder buffer: position (3) + normal (3), interleaved
+	glGenVertexArrays(1, &viz_cylinder_vao);
+	glGenBuffers(1, &viz_cylinder_vbo);
+	glBindVertexArray(viz_cylinder_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, viz_cylinder_vbo);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
 
 	glBindVertexArray(0);
 
@@ -1030,6 +1163,92 @@ void viz_build_OBB_faces(const OBB& box, const vector_3& origin, vector<float>& 
 	}
 }
 
+// Appends an open cylinder (no end caps) from a to b as GL_TRIANGLES,
+// interleaved position + normal. a and b are already relative to the
+// render origin, so the float conversion keeps full precision near it.
+void viz_append_cylinder(vector<float>& v, const vector_3& a, const vector_3& b, const real_type radius)
+{
+	vector_3 dir = b - a;
+	const real_type len = dir.length();
+
+	if (len <= 0)
+		return;
+
+	dir = dir / len;
+
+	// Any vector not parallel to dir, then an orthonormal pair around it
+	const vector_3 helper = (fabs(dir.x) < 0.9) ? vector_3(1, 0, 0) : vector_3(0, 1, 0);
+	vector_3 u = dir.cross(helper);
+	u.normalize();
+	vector_3 w = dir.cross(u);
+	w.normalize();
+
+	auto push_vertex = [&](const vector_3& base, vector_3 n)
+		{
+			vector_3 p = n * radius;
+			p += base;
+
+			v.push_back(static_cast<float>(p.x));
+			v.push_back(static_cast<float>(p.y));
+			v.push_back(static_cast<float>(p.z));
+			v.push_back(static_cast<float>(n.x));
+			v.push_back(static_cast<float>(n.y));
+			v.push_back(static_cast<float>(n.z));
+		};
+
+	for (int i = 0; i < viz_cylinder_sides; i++)
+	{
+		const real_type t0 = 2.0 * pi * i / viz_cylinder_sides;
+		const real_type t1 = 2.0 * pi * (i + 1) / viz_cylinder_sides;
+
+		vector_3 n0 = u * cos(t0);
+		n0 += w * sin(t0);
+		vector_3 n1 = u * cos(t1);
+		n1 += w * sin(t1);
+
+		push_vertex(a, n0); push_vertex(b, n0); push_vertex(b, n1);
+		push_vertex(a, n0); push_vertex(b, n1); push_vertex(a, n1);
+	}
+}
+
+// Rebuilds the cylinder buffer if new field lines arrived, the render origin
+// moved (new simulation step) or the thickness changed.
+void viz_update_field_line_cylinders(const vector_3& origin, const real_type radius)
+{
+	vector<field_line> lines;
+	{
+		std::lock_guard<std::mutex> lock(field_line_mutex);
+
+		// The generation check catches a clear followed by a refill to the
+		// same count between two frames
+		const bool up_to_date =
+			recorded_field_line_generation == viz_cylinder_built_generation &&
+			recorded_field_lines.size() == viz_cylinder_built_count &&
+			viz_cylinder_built_origin == origin &&
+			viz_cylinder_built_radius == static_cast<float>(radius);
+
+		if (up_to_date)
+			return;
+
+		lines = recorded_field_lines;
+		viz_cylinder_built_generation = recorded_field_line_generation;
+	}
+
+	vector<float> v;
+	v.reserve(lines.size() * viz_cylinder_sides * 6 * 6);
+
+	for (const field_line& fl : lines)
+		viz_append_cylinder(v, fl.start - origin, fl.end - origin, radius);
+
+	glBindBuffer(GL_ARRAY_BUFFER, viz_cylinder_vbo);
+	glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_STATIC_DRAW);
+	viz_cylinder_vertex_count = static_cast<GLsizei>(v.size() / 6);
+
+	viz_cylinder_built_count = lines.size();
+	viz_cylinder_built_origin = origin;
+	viz_cylinder_built_radius = static_cast<float>(radius);
+}
+
 void viz_draw_dynamic(const vector<float>& v, const GLenum mode, const float r, const float g, const float b, const float a)
 {
 	if (v.empty())
@@ -1047,9 +1266,10 @@ void viz_update_title(const render_snapshot& snap)
 	char buffer[256];
 
 	snprintf(buffer, sizeof(buffer),
-		"Receiver (cyan) / forward (orange) boxes  |  step %zu of %zu  |  r = %.6g%s",
+		"Receiver (cyan) / forward (orange) boxes  |  step %zu of %zu  |  r = %.6g  |  field lines %zu%s",
 		snap.step, snap.step_count,
 		static_cast<double>(snap.receiver_box.r),
+		recorded_field_line_count.load(std::memory_order_relaxed),
 		snap.finished ? "  |  simulation finished" : "");
 
 	if (viz_last_title != buffer)
@@ -1160,6 +1380,27 @@ void viz_display()
 	viz_draw_dynamic(receiver_edges, GL_LINES, 0.20f, 0.85f, 1.00f, 1.0f);
 	viz_draw_dynamic(forward_edges, GL_LINES, 1.00f, 0.60f, 0.15f, 1.0f);
 
+	// --- Field lines as thin cylinders (opaque, lit by a headlight) ---
+	if (viz_show_field_lines)
+	{
+		viz_update_field_line_cylinders(target, viz_field_line_radius_scale * box_size);
+
+		if (viz_cylinder_vertex_count > 0)
+		{
+			const vec3f light_dir = vec3f_normalize(eye);
+
+			glUseProgram(viz_lit_program);
+			glUniformMatrix4fv(viz_lit_mvp_location, 1, GL_FALSE, view_proj.m);
+			glUniform4f(viz_lit_color_location, 0.95f, 0.90f, 0.35f, 1.0f);
+			glUniform3f(viz_lit_light_dir_location, light_dir.x, light_dir.y, light_dir.z);
+
+			glBindVertexArray(viz_cylinder_vao);
+			glDrawArrays(GL_TRIANGLES, 0, viz_cylinder_vertex_count);
+
+			glUseProgram(viz_program);
+		}
+	}
+
 	// --- Box faces (translucent, drawn last without depth writes) ---
 	if (viz_show_faces)
 	{
@@ -1201,6 +1442,9 @@ void viz_keyboard(unsigned char key, int, int)
 	case 'f': case 'F': viz_show_faces = !viz_show_faces; break;
 	case 'e': case 'E': viz_show_emitter = !viz_show_emitter; break;
 	case 'a': case 'A': viz_show_axes = !viz_show_axes; break;
+	case 'l': case 'L': viz_show_field_lines = !viz_show_field_lines; break;
+	case '[': viz_field_line_radius_scale /= 1.5f; break;
+	case ']': viz_field_line_radius_scale *= 1.5f; break;
 	case 'r': case 'R':
 		viz_camera_yaw = viz_default_yaw;
 		viz_camera_pitch = viz_default_pitch;
