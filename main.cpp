@@ -14,6 +14,7 @@
 #include <chrono>
 #include <iomanip>
 #include <limits>
+#include <cstdint>
 
 // Atomic counter for progress tracking
 std::atomic<long long unsigned int> global_progress(0);
@@ -230,7 +231,9 @@ void publish_simulation_finished()
 // current simulation step. Only calls made with record_field_line = true are captured, so a
 // field line that is traced against several boxes is stored only once.
 // ---------------------------------------------------------------------------
-const size_t max_recorded_field_lines = 10000;
+const size_t max_recorded_field_lines = 1e4;
+const real_type n_geometrized = 1e4; // field line count
+
 
 struct field_line
 {
@@ -363,6 +366,117 @@ vector_3 random_unit_vector(std::mt19937& local_gen, std::uniform_real_distribut
 }
 
 
+// ---------------------------------------------------------------------------
+// Low-discrepancy (quasi-random) sampling: Owen-scrambled 4D Sobol sequence
+//
+// Each iteration needs one sample of the 4D product space S2 x S2 (location
+// and r). A plain Kronecker / R_d sequence is a rank-1 lattice, so its 2D
+// projections show up on the sphere as visible rows. Sobol points with a
+// nested uniform (Owen) scramble keep the low discrepancy and the 4D
+// stratification, but the lattice structure is destroyed, so the points look
+// evenly spread with no rows. Sample i depends only on i, so the thread split
+// does not matter. Best balance when n is a power of 2, but any n works.
+// ---------------------------------------------------------------------------
+inline uint32_t reverse_bits_32(uint32_t x)
+{
+	x = ((x >> 1) & 0x55555555u) | ((x & 0x55555555u) << 1);
+	x = ((x >> 2) & 0x33333333u) | ((x & 0x33333333u) << 2);
+	x = ((x >> 4) & 0x0F0F0F0Fu) | ((x & 0x0F0F0F0Fu) << 4);
+	x = ((x >> 8) & 0x00FF00FFu) | ((x & 0x00FF00FFu) << 8);
+	return (x >> 16) | (x << 16);
+}
+
+struct sobol_4d_directions
+{
+	uint32_t v[4][32];
+
+	sobol_4d_directions()
+	{
+		// Joe & Kuo parameters for dimensions 2..4: degree s, coefficients a, initial m
+		const int      s[3] = { 1, 2, 3 };
+		const uint32_t a[3] = { 0, 1, 1 };
+		const uint32_t m[3][3] = { { 1, 0, 0 }, { 1, 3, 0 }, { 1, 3, 1 } };
+
+		for (int k = 0; k < 32; k++)
+			v[0][k] = 1u << (31 - k); // dimension 1: van der Corput
+
+		for (int d = 1; d < 4; d++)
+		{
+			const int deg = s[d - 1];
+
+			for (int k = 0; k < deg; k++)
+				v[d][k] = m[d - 1][k] << (31 - k);
+
+			for (int k = deg; k < 32; k++)
+			{
+				uint32_t x = v[d][k - deg] ^ (v[d][k - deg] >> deg);
+
+				for (int j = 1; j < deg; j++)
+					if ((a[d - 1] >> (deg - 1 - j)) & 1u)
+						x ^= v[d][k - j];
+
+				v[d][k] = x;
+			}
+		}
+	}
+};
+
+const sobol_4d_directions sobol_directions;
+
+inline uint32_t sobol_32(uint32_t index, const int dim)
+{
+	uint32_t x = 0;
+	for (int k = 0; index != 0; index >>= 1, k++)
+		if (index & 1u)
+			x ^= sobol_directions.v[dim][k];
+	return x;
+}
+
+inline uint32_t hash_32(uint32_t x)
+{
+	x ^= x >> 16; x *= 0x21f0aaadu;
+	x ^= x >> 15; x *= 0xd35a2d97u;
+	x ^= x >> 15;
+	return x;
+}
+
+// Laine-Karras style nested uniform (Owen) scramble
+inline uint32_t owen_scramble_32(uint32_t x, const uint32_t seed)
+{
+	x = reverse_bits_32(x);
+	x ^= x * 0x3d20adeau;
+	x += seed;
+	x *= (seed >> 16) | 1u;
+	x ^= x * 0x05526c56u;
+	x ^= x * 0x53a22864u;
+	return reverse_bits_32(x);
+}
+
+const uint32_t sobol_scramble_seed = 0x9e3779b9u;
+
+void qmc_sample_4d(const long long unsigned int i, real_type u[4])
+{
+	for (int d = 0; d < 4; d++)
+	{
+		const uint32_t seed = hash_32(sobol_scramble_seed + 0x632be5abu * static_cast<uint32_t>(d + 1));
+		const uint32_t bits = owen_scramble_32(sobol_32(static_cast<uint32_t>(i), d), seed);
+		u[d] = (static_cast<real_type>(bits) + 0.5) / 4294967296.0;
+	}
+}
+
+// Area-preserving map from the unit square to the unit sphere (Archimedes'
+// hat-box theorem): z uniform in [-1, 1], azimuth uniform in [0, 2 pi).
+// This is the same map random_unit_vector uses, so an evenly spread square
+// becomes an evenly spread sphere.
+vector_3 unit_square_to_sphere(const real_type u, const real_type v)
+{
+	const real_type z = 2.0 * u - 1.0;
+	const real_type a = 2.0 * pi * v;
+	const real_type s = sqrt(fmax(0.0, 1.0 - z * z));
+
+	return vector_3(s * cos(a), s * sin(a), z);
+}
+
 
 // Worker function for each thread
 void worker_thread(
@@ -397,6 +511,12 @@ void worker_thread(
 
 	for (long long unsigned int i = start_idx; i < end_idx; i++)
 	{
+		// One low-discrepancy sample of S2 x S2 per field line
+		real_type u[4];
+		qmc_sample_4d(i, u);
+
+		//vector_3 location = unit_square_to_sphere(u[0], u[1]);
+
 		vector_3 location = random_unit_vector(local_gen, local_dis);
 
 		location.x *= emitter_radius;
@@ -417,7 +537,9 @@ void worker_thread(
 		//		surface_normal, local_gen, local_dis);
 
 		// C) Schwarzschild gravitation, quantum
+		//vector_3 r = unit_square_to_sphere(u[2], u[3]);
 		vector_3 r = random_unit_vector(local_gen, local_dis);
+
 
 		r.x *= emitter_radius;
 		r.y *= emitter_radius;
@@ -589,7 +711,7 @@ void run_simulation()
 
 
 
-	const real_type n_geometrized = 1e7; // field line count
+
 	const real_type spin = 0.0; // a_*
 
 	// --- derived ---
@@ -620,7 +742,7 @@ void run_simulation()
 
 	real_type end_pos = start_pos * 2.0;
 
-	const size_t pos_res = 30; // Minimum 2 steps
+	const size_t pos_res = 2; // Minimum 2 steps
 
 	const real_type pos_step_size =
 		(end_pos - start_pos)
@@ -768,7 +890,9 @@ void run_simulation()
 //   e            toggle emitter (horizon) wireframe
 //   a            toggle axes (x red, y green, z blue) at the receiver centre
 //   l            toggle field lines (first 1000 traced by intersect_OBB)
-//   [ / ]        make the field line cylinders thinner / thicker
+//   s            toggle field line start markers (small spheres on the emitter)
+//   [ / ]        make the field line cylinders (and markers) thinner / thicker
+//   - / =        make the start markers smaller / larger relative to the lines
 //   r            reset camera
 //   Esc          quit (also stops the simulation)
 //
@@ -886,6 +1010,23 @@ float viz_cylinder_built_radius = -1.0f;
 const int viz_cylinder_sides = 8;
 float viz_field_line_radius_scale = 0.02f; // cylinder radius as a fraction of the receiver box size
 
+// Field line start markers: one low-poly unit sphere mesh, drawn instanced
+// (one instance per recorded field line) at each line's start point on the
+// emitter surface. Shares the lit fragment shader with the cylinders.
+GLuint viz_marker_program = 0;
+GLint viz_marker_mvp_location = -1;
+GLint viz_marker_radius_location = -1;
+GLint viz_marker_color_location = -1;
+GLint viz_marker_light_dir_location = -1;
+
+GLuint viz_marker_vao = 0, viz_marker_mesh_vbo = 0, viz_marker_instance_vbo = 0;
+GLsizei viz_marker_mesh_vertex_count = 0;
+GLsizei viz_marker_instance_count = 0;
+
+const int viz_marker_stacks = 8;
+const int viz_marker_slices = 12;
+float viz_marker_radius_factor = 15.0f; // marker radius as a multiple of the cylinder radius
+
 // --- Window / camera / UI state ---
 int viz_window_width = 1280;
 int viz_window_height = 720;
@@ -906,6 +1047,7 @@ bool viz_show_faces = true;
 bool viz_show_emitter = true;
 bool viz_show_axes = true;
 bool viz_show_field_lines = true;
+bool viz_show_markers = true;
 
 std::string viz_last_title;
 
@@ -955,6 +1097,21 @@ void main()
 {
 	float diffuse = abs(dot(normalize(v_normal), light_dir));
 	frag_color = vec4(color.rgb * (0.3 + 0.7 * diffuse), color.a);
+}
+)";
+
+// Instanced unit sphere: the mesh vertex doubles as its own normal
+const char* viz_marker_vertex_shader_source = R"(
+#version 400 core
+layout(location = 0) in vec3 position;
+layout(location = 2) in vec3 instance_offset;
+uniform mat4 mvp;
+uniform float radius;
+out vec3 v_normal;
+void main()
+{
+	v_normal = position;
+	gl_Position = mvp * vec4(instance_offset + radius * position, 1.0);
 }
 )";
 
@@ -1009,13 +1166,51 @@ GLuint viz_link_program(const char* vertex_source, const char* fragment_source)
 	return program;
 }
 
+// Latitude / longitude triangulated unit sphere, positions only (GL_TRIANGLES)
+void viz_build_marker_mesh()
+{
+	vector<float> v;
+
+	auto push_unit = [&](const real_type theta, const real_type phi)
+		{
+			v.push_back(static_cast<float>(sin(theta) * cos(phi)));
+			v.push_back(static_cast<float>(sin(theta) * sin(phi)));
+			v.push_back(static_cast<float>(cos(theta)));
+		};
+
+	for (int i = 0; i < viz_marker_stacks; i++)
+	{
+		const real_type t0 = pi * i / viz_marker_stacks;
+		const real_type t1 = pi * (i + 1) / viz_marker_stacks;
+
+		for (int j = 0; j < viz_marker_slices; j++)
+		{
+			const real_type p0 = 2.0 * pi * j / viz_marker_slices;
+			const real_type p1 = 2.0 * pi * (j + 1) / viz_marker_slices;
+
+			push_unit(t0, p0); push_unit(t1, p0); push_unit(t1, p1);
+			push_unit(t0, p0); push_unit(t1, p1); push_unit(t0, p1);
+		}
+	}
+
+	glBindBuffer(GL_ARRAY_BUFFER, viz_marker_mesh_vbo);
+	glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_STATIC_DRAW);
+	viz_marker_mesh_vertex_count = static_cast<GLsizei>(v.size() / 3);
+}
+
 bool viz_init_gl()
 {
 	viz_program = viz_link_program(viz_vertex_shader_source, viz_fragment_shader_source);
 	viz_lit_program = viz_link_program(viz_lit_vertex_shader_source, viz_lit_fragment_shader_source);
+	viz_marker_program = viz_link_program(viz_marker_vertex_shader_source, viz_lit_fragment_shader_source);
 
-	if (viz_program == 0 || viz_lit_program == 0)
+	if (viz_program == 0 || viz_lit_program == 0 || viz_marker_program == 0)
 		return false;
+
+	viz_marker_mvp_location = glGetUniformLocation(viz_marker_program, "mvp");
+	viz_marker_radius_location = glGetUniformLocation(viz_marker_program, "radius");
+	viz_marker_color_location = glGetUniformLocation(viz_marker_program, "color");
+	viz_marker_light_dir_location = glGetUniformLocation(viz_marker_program, "light_dir");
 
 	viz_lit_mvp_location = glGetUniformLocation(viz_lit_program, "mvp");
 	viz_lit_color_location = glGetUniformLocation(viz_lit_program, "color");
@@ -1049,6 +1244,23 @@ bool viz_init_gl()
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
 	glEnableVertexAttribArray(1);
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+
+	// Start markers: static unit sphere mesh (location 0) + per-instance offset (location 2)
+	glGenVertexArrays(1, &viz_marker_vao);
+	glGenBuffers(1, &viz_marker_mesh_vbo);
+	glGenBuffers(1, &viz_marker_instance_vbo);
+	glBindVertexArray(viz_marker_vao);
+
+	glBindBuffer(GL_ARRAY_BUFFER, viz_marker_mesh_vbo);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+
+	glBindBuffer(GL_ARRAY_BUFFER, viz_marker_instance_vbo);
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+	glVertexAttribDivisor(2, 1);
+
+	viz_build_marker_mesh();
 
 	glBindVertexArray(0);
 
@@ -1211,9 +1423,10 @@ void viz_append_cylinder(vector<float>& v, const vector_3& a, const vector_3& b,
 	}
 }
 
-// Rebuilds the cylinder buffer if new field lines arrived, the render origin
-// moved (new simulation step) or the thickness changed.
-void viz_update_field_line_cylinders(const vector_3& origin, const real_type radius)
+// Rebuilds the cylinder buffer and the start marker instance buffer if new
+// field lines arrived, the render origin moved (new simulation step) or the
+// thickness changed.
+void viz_update_field_line_buffers(const vector_3& origin, const real_type radius)
 {
 	vector<field_line> lines;
 	{
@@ -1243,6 +1456,18 @@ void viz_update_field_line_cylinders(const vector_3& origin, const real_type rad
 	glBindBuffer(GL_ARRAY_BUFFER, viz_cylinder_vbo);
 	glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_STATIC_DRAW);
 	viz_cylinder_vertex_count = static_cast<GLsizei>(v.size() / 6);
+
+	// One marker instance per field line, at its start point (on the emitter
+	// surface), relative to the render origin
+	vector<float> starts;
+	starts.reserve(lines.size() * 3);
+
+	for (const field_line& fl : lines)
+		viz_push(starts, fl.start - origin);
+
+	glBindBuffer(GL_ARRAY_BUFFER, viz_marker_instance_vbo);
+	glBufferData(GL_ARRAY_BUFFER, starts.size() * sizeof(float), starts.data(), GL_STATIC_DRAW);
+	viz_marker_instance_count = static_cast<GLsizei>(lines.size());
 
 	viz_cylinder_built_count = lines.size();
 	viz_cylinder_built_origin = origin;
@@ -1380,15 +1605,17 @@ void viz_display()
 	viz_draw_dynamic(receiver_edges, GL_LINES, 0.20f, 0.85f, 1.00f, 1.0f);
 	viz_draw_dynamic(forward_edges, GL_LINES, 1.00f, 0.60f, 0.15f, 1.0f);
 
+	const real_type field_line_radius = viz_field_line_radius_scale * box_size;
+	const vec3f light_dir = vec3f_normalize(eye);
+
+	if (viz_show_field_lines || viz_show_markers)
+		viz_update_field_line_buffers(target, field_line_radius);
+
 	// --- Field lines as thin cylinders (opaque, lit by a headlight) ---
 	if (viz_show_field_lines)
 	{
-		viz_update_field_line_cylinders(target, viz_field_line_radius_scale * box_size);
-
 		if (viz_cylinder_vertex_count > 0)
 		{
-			const vec3f light_dir = vec3f_normalize(eye);
-
 			glUseProgram(viz_lit_program);
 			glUniformMatrix4fv(viz_lit_mvp_location, 1, GL_FALSE, view_proj.m);
 			glUniform4f(viz_lit_color_location, 0.95f, 0.90f, 0.35f, 1.0f);
@@ -1399,6 +1626,21 @@ void viz_display()
 
 			glUseProgram(viz_program);
 		}
+	}
+
+	// --- Field line start markers: small spheres on the emitter surface ---
+	if (viz_show_markers && viz_marker_instance_count > 0 && viz_marker_mesh_vertex_count > 0)
+	{
+		glUseProgram(viz_marker_program);
+		glUniformMatrix4fv(viz_marker_mvp_location, 1, GL_FALSE, view_proj.m);
+		glUniform1f(viz_marker_radius_location, static_cast<float>(viz_marker_radius_factor * field_line_radius));
+		glUniform4f(viz_marker_color_location, 1.00f, 0.35f, 0.45f, 1.0f);
+		glUniform3f(viz_marker_light_dir_location, light_dir.x, light_dir.y, light_dir.z);
+
+		glBindVertexArray(viz_marker_vao);
+		glDrawArraysInstanced(GL_TRIANGLES, 0, viz_marker_mesh_vertex_count, viz_marker_instance_count);
+
+		glUseProgram(viz_program);
 	}
 
 	// --- Box faces (translucent, drawn last without depth writes) ---
@@ -1443,6 +1685,9 @@ void viz_keyboard(unsigned char key, int, int)
 	case 'e': case 'E': viz_show_emitter = !viz_show_emitter; break;
 	case 'a': case 'A': viz_show_axes = !viz_show_axes; break;
 	case 'l': case 'L': viz_show_field_lines = !viz_show_field_lines; break;
+	case 's': case 'S': viz_show_markers = !viz_show_markers; break;
+	case '-': viz_marker_radius_factor /= 1.5f; break;
+	case '=': case '+': viz_marker_radius_factor *= 1.5f; break;
 	case '[': viz_field_line_radius_scale /= 1.5f; break;
 	case ']': viz_field_line_radius_scale *= 1.5f; break;
 	case 'r': case 'R':
