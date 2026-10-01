@@ -16,6 +16,18 @@
 #include <limits>
 #include <cstdint>
 
+
+
+
+
+const real_type spin = 0.999; // a_*
+const real_type theta = pi / 2.0;
+const real_type n_geometrized = 1e9; // field line count
+
+
+
+
+
 // Atomic counter for progress tracking
 std::atomic<long long unsigned int> global_progress(0);
 
@@ -231,8 +243,13 @@ void publish_simulation_finished()
 // current simulation step. Only calls made with record_field_line = true are captured, so a
 // field line that is traced against several boxes is stored only once.
 // ---------------------------------------------------------------------------
-const size_t max_recorded_field_lines = 1e4;
-const real_type n_geometrized = 1e4; // field line count
+const long long unsigned int max_recorded_field_lines 
+	= static_cast<long long unsigned int>(1e3);
+
+
+
+
+
 
 
 struct field_line
@@ -341,10 +358,10 @@ vector_3 random_cosine_weighted_hemisphere(vector_3 normal,
 	vector_3 uu = normal.cross(vector_3(0.0, 1.0, 1.0)).normalize();
 	vector_3 vv = uu.cross(normal);
 
-	double ra = sqrt(r.y);
-	double rx = ra * cos(2.0 * pi * r.x);
-	double ry = ra * sin(2.0 * pi * r.x);
-	double rz = sqrt(1.0 - r.y);
+	real_type ra = sqrt(r.y);
+	real_type rx = ra * cos(2.0 * pi * r.x);
+	real_type ry = ra * sin(2.0 * pi * r.x);
+	real_type rz = sqrt(1.0 - r.y);
 	vector_3 rr = vector_3(uu * rx + vv * ry + normal * rz);
 
 	return rr.normalize();
@@ -512,8 +529,8 @@ void worker_thread(
 	for (long long unsigned int i = start_idx; i < end_idx; i++)
 	{
 		// One low-discrepancy sample of S2 x S2 per field line
-		real_type u[4];
-		qmc_sample_4d(i, u);
+		//real_type u[4];
+		//qmc_sample_4d(i, u);
 
 		//vector_3 location = unit_square_to_sphere(u[0], u[1]);
 
@@ -590,13 +607,13 @@ void progress_monitor(long long unsigned int total_iterations, std::atomic<bool>
 		std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
 		long long unsigned int current = global_progress.load(std::memory_order_relaxed);
-		double progress = static_cast<double>(current) / static_cast<double>(total_iterations);
+		real_type progress = static_cast<real_type>(current) / static_cast<real_type>(total_iterations);
 
 		auto now = std::chrono::steady_clock::now();
 		auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
 
 		// Estimate time remaining
-		double eta_seconds = 0;
+		real_type eta_seconds = 0;
 		if (progress > 0.001)
 		{
 			eta_seconds = (elapsed / progress) * (1.0 - progress);
@@ -703,6 +720,56 @@ pair<real_type, real_type> get_intersecting_line_density(
 	return pair<real_type, real_type>(total_count_plus - total_count, total_count_forward - total_count);
 }
 
+
+
+
+
+
+
+
+
+
+
+real_type expr(real_type r, real_type a, real_type M, real_type t)
+{
+	const real_type a2 = a * a;
+	const real_type a4 = a2 * a2;
+	const real_type r2 = r * r;
+	const real_type r3 = r2 * r;
+	const real_type s = std::sin(t);
+	const real_type c = std::cos(t);
+	const real_type s2 = s * s;
+	const real_type c2 = c * c;
+
+	const real_type sum = a2 + r2;              // a^2 + r^2
+	const real_type delta = a2 + r * (r - 2.0 * M); // a^2 + r(r - 2M)
+
+	const real_type num =
+		r * (sum * (a4 + a2 * r * (r - 3.0 * M) + M * r3)
+			- a2 * s2 * delta * delta)
+		- a2 * sum * c2 * (a2 * (M + r) + r2 * (r - 3.0 * M));
+
+	const real_type D = sum * sum - s2 * (a4 + a2 * r * (r - 2.0 * M));
+
+	const real_type den = D * D * std::sqrt(delta * (a2 * c2 + r2) / D);
+
+	return num / den;
+}
+
+
+
+double deta_dr(double r, double theta, double M, double a) {
+	const double s2 = std::sin(theta) * std::sin(theta), c2 = 1.0 - s2;
+	const double r2a2 = r * r + a * a;
+	const double Sigma = r * r + a * a * c2;
+	const double Delta = r * r - 2.0 * M * r + a * a;
+	const double A = r2a2 * r2a2 - a * a * Delta * s2;
+	const double dA_half = 2.0 * r * r2a2 - a * a * (r - M) * s2;   // (dA/dr)/2
+	const double num = 2.0 * A * (r * Delta + (r - M) * Sigma) - Sigma * Delta * dA_half * 2.0 / 2.0 * 1.0;
+	return num / (2.0 * std::pow(A, 1.5) * std::sqrt(Sigma * Delta));
+}
+
+
 void run_simulation()
 {
 	ofstream outfile_numerical("Schwarzschild_numerical");
@@ -712,7 +779,9 @@ void run_simulation()
 
 
 
-	const real_type spin = 0.0; // a_*
+
+
+
 
 	// --- derived ---
 	const real_type spin_root = sqrt(1.0 - spin * spin);
@@ -850,17 +919,47 @@ void run_simulation()
 		const real_type a_Schwarzschild_geometrized =
 			emitter_r_plus_geometrized / (pi * pow(receiver_distance_geometrized, 2.0) * dt_Schwarzschild);
 
-		cout << "a_Schwarzschild_geometrized " << a_Schwarzschild_geometrized << endl;
+
+
+		const real_type sigma = receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized * cos(theta)*cos(theta);
+		const real_type delta = receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized;
+		const real_type A = (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) - emitter_a_geometrized * emitter_a_geometrized * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * sin(theta) * sin(theta);
+
+		//const real_type dt_Kerr = sqrt(sigma*delta/A);
+		//const real_type dt_Kerr = sqrt((receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized * cos(theta) * cos(theta)) * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) / ((receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) - emitter_a_geometrized * emitter_a_geometrized * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * sin(theta) * sin(theta)));
+
+
+
+//		const real_type a_Kerr_geometrized =
+
+//			(2.0/pi)*expr(receiver_distance_geometrized, emitter_a_geometrized, emitter_mass_geometrized, theta);
+
+
+		double a_Kerr_geometrized = (2.0 / pi)*deta_dr(receiver_distance_geometrized, theta, emitter_mass_geometrized, emitter_a_geometrized);
+
+		//cout << a_Kerr_geometrized << " " << a_Kerr_geometrized_ << endl;
+		//exit(0);
+
+			//emitter_r_plus_geometrized / (pi * pow(receiver_distance_geometrized, 2.0) * dt_Schwarzschild);
+
+
+
+
+
+
+		cout << "a_Kerr_geometrized " << a_Kerr_geometrized << endl;
+
+//		cout << "a_Schwarzschild_geometrized " << a_Schwarzschild_geometrized << endl;
 		cout << "a_Newton_geometrized " << a_Newton_geometrized << endl;
 		cout << "a_flat_geometrized " << a_flat_geometrized << endl;
 		cout << "a_flat_geometrized_forward " << a_flat_geometrized_forward << endl;
 
 
-		cout << a_Schwarzschild_geometrized / a_flat_geometrized << endl;
+		cout << a_Kerr_geometrized / a_flat_geometrized << endl;
 		cout << endl;
 
-		cout << a_Schwarzschild_geometrized / a_flat_geometrized_forward << endl;
-		cout << endl;
+		//cout << a_Schwarzschild_geometrized / a_flat_geometrized_forward << endl;
+		//cout << endl;
 
 		cout << a_Newton_geometrized / a_flat_geometrized << endl;
 		cout << endl << endl;
@@ -897,7 +996,7 @@ void run_simulation()
 //   Esc          quit (also stops the simulation)
 //
 // Everything is drawn relative to the midpoint of the two boxes, computed in
-// real_type (long double) before converting to float, so the boxes stay
+// real_type (long real_type) before converting to float, so the boxes stay
 // precise even when they are far from the origin.
 // ===========================================================================
 
@@ -1100,7 +1199,7 @@ void main()
 }
 )";
 
-// Instanced unit sphere: the mesh vertex doubles as its own normal
+// Instanced unit sphere: the mesh vertex real_types as its own normal
 const char* viz_marker_vertex_shader_source = R"(
 #version 400 core
 layout(location = 0) in vec3 position;
@@ -1493,7 +1592,7 @@ void viz_update_title(const render_snapshot& snap)
 	snprintf(buffer, sizeof(buffer),
 		"Receiver (cyan) / forward (orange) boxes  |  step %zu of %zu  |  r = %.6g  |  field lines %zu%s",
 		snap.step, snap.step_count,
-		static_cast<double>(snap.receiver_box.r),
+		static_cast<real_type>(snap.receiver_box.r),
 		recorded_field_line_count.load(std::memory_order_relaxed),
 		snap.finished ? "  |  simulation finished" : "");
 
