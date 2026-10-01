@@ -809,11 +809,13 @@ void run_simulation()
 		emitter_r_plus_geometrized
 		+ receiver_radius_geometrized;
 
-	real_type end_pos = start_pos * 2.0;
+	start_pos *= 2.0;
+
+	real_type end_pos = start_pos;// start_pos * 2.0;
 
 	const size_t pos_res = 2; // Minimum 2 steps
 
-	const real_type pos_step_size =
+	const real_type pos_step_size = 
 		(end_pos - start_pos)
 		/ (pos_res - 1);
 
