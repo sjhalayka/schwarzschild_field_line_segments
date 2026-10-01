@@ -182,7 +182,7 @@ void make_receiver_boxes(
 	//	forward_box = translate_OBB(receiver_box, vector_3(0.0, 0.0, epsilon));
 	forward_box = make_radial_OBB(
 		receiver_distance,
-		0.5 * pi,
+		theta,
 		epsilon / receiver_distance,
 		vector_3(receiver_radius, receiver_radius, receiver_radius));
 }
@@ -243,8 +243,8 @@ void publish_simulation_finished()
 // current simulation step. Only calls made with record_field_line = true are captured, so a
 // field line that is traced against several boxes is stored only once.
 // ---------------------------------------------------------------------------
-const long long unsigned int max_recorded_field_lines 
-	= static_cast<long long unsigned int>(1e3);
+const long long unsigned int max_recorded_field_lines
+= static_cast<long long unsigned int>(1e6);
 
 
 
@@ -255,6 +255,7 @@ const long long unsigned int max_recorded_field_lines
 struct field_line
 {
 	vector_3 start, end;
+	bool is_first_segment; // true only for the segment that begins on the emitter surface
 };
 
 std::mutex field_line_mutex;
@@ -271,7 +272,7 @@ void clear_recorded_field_lines()
 	recorded_field_line_generation++;
 }
 
-void record_field_line(const vector_3& start, const vector_3& end)
+void record_field_line(const vector_3& start, const vector_3& end, const bool is_first_segment)
 {
 	// Cheap check first, so the worker threads never touch the mutex once full
 	if (recorded_field_line_count.load(std::memory_order_relaxed) >= max_recorded_field_lines)
@@ -282,7 +283,7 @@ void record_field_line(const vector_3& start, const vector_3& end)
 	if (recorded_field_lines.size() >= max_recorded_field_lines)
 		return;
 
-	recorded_field_lines.push_back({ start, end });
+	recorded_field_lines.push_back({ start, end, is_first_segment });
 	recorded_field_line_count.store(recorded_field_lines.size(), std::memory_order_relaxed);
 }
 
@@ -323,6 +324,9 @@ real_type intersect_OBB(
 	vector_3 segment_start = ray_origin;
 	vector_3 segment_end = ray_origin + ray;
 
+	if (record_this_field_line)
+		record_field_line(segment_start, segment_end, true);
+
 	real_type total_length = 0;
 
 	while (segment_end.length() < max_distance)
@@ -332,11 +336,11 @@ real_type intersect_OBB(
 
 		segment_start = segment_end;
 		segment_end += ray;
+
+		if (record_this_field_line)
+			record_field_line(segment_start, segment_end, false);
 	}
 
-	// segment_start is now the end of the last segment that was tested
-	if (record_this_field_line)
-		record_field_line(ray_origin, segment_start);
 
 	return total_length;
 }
@@ -815,7 +819,7 @@ void run_simulation()
 
 	const size_t pos_res = 2; // Minimum 2 steps
 
-	const real_type pos_step_size = 
+	const real_type pos_step_size =
 		(end_pos - start_pos)
 		/ (pos_res - 1);
 
@@ -923,7 +927,7 @@ void run_simulation()
 
 
 
-		const real_type sigma = receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized * cos(theta)*cos(theta);
+		const real_type sigma = receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized * cos(theta) * cos(theta);
 		const real_type delta = receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized;
 		const real_type A = (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) - emitter_a_geometrized * emitter_a_geometrized * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * sin(theta) * sin(theta);
 
@@ -937,7 +941,7 @@ void run_simulation()
 //			(2.0/pi)*expr(receiver_distance_geometrized, emitter_a_geometrized, emitter_mass_geometrized, theta);
 
 
-		double a_Kerr_geometrized = (2.0 / pi)*deta_dr(receiver_distance_geometrized, theta, emitter_mass_geometrized, emitter_a_geometrized);
+		double a_Kerr_geometrized = (2.0 / pi) * deta_dr(receiver_distance_geometrized, theta, emitter_mass_geometrized, emitter_a_geometrized);
 
 		//cout << a_Kerr_geometrized << " " << a_Kerr_geometrized_ << endl;
 		//exit(0);
@@ -951,7 +955,7 @@ void run_simulation()
 
 		cout << "a_Kerr_geometrized " << a_Kerr_geometrized << endl;
 
-//		cout << "a_Schwarzschild_geometrized " << a_Schwarzschild_geometrized << endl;
+		//		cout << "a_Schwarzschild_geometrized " << a_Schwarzschild_geometrized << endl;
 		cout << "a_Newton_geometrized " << a_Newton_geometrized << endl;
 		cout << "a_flat_geometrized " << a_flat_geometrized << endl;
 		cout << "a_flat_geometrized_forward " << a_flat_geometrized_forward << endl;
@@ -1558,17 +1562,17 @@ void viz_update_field_line_buffers(const vector_3& origin, const real_type radiu
 	glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_STATIC_DRAW);
 	viz_cylinder_vertex_count = static_cast<GLsizei>(v.size() / 6);
 
-	// One marker instance per field line, at its start point (on the emitter
-	// surface), relative to the render origin
+	// One marker instance per field line (not per segment), at the start point
+	// of its first segment (on the emitter surface), relative to the render origin
 	vector<float> starts;
-	starts.reserve(lines.size() * 3);
 
 	for (const field_line& fl : lines)
-		viz_push(starts, fl.start - origin);
+		if (fl.is_first_segment)
+			viz_push(starts, fl.start - origin);
 
 	glBindBuffer(GL_ARRAY_BUFFER, viz_marker_instance_vbo);
 	glBufferData(GL_ARRAY_BUFFER, starts.size() * sizeof(float), starts.data(), GL_STATIC_DRAW);
-	viz_marker_instance_count = static_cast<GLsizei>(lines.size());
+	viz_marker_instance_count = static_cast<GLsizei>(starts.size() / 3);
 
 	viz_cylinder_built_count = lines.size();
 	viz_cylinder_built_origin = origin;
