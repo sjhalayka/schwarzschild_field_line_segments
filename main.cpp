@@ -317,7 +317,7 @@ real_type intersect_OBB(
 {
 	// No point of the box is farther from the origin than bounding_radius;
 	// one extra segment of margin covers segments that straddle that sphere.
-	const real_type max_distance = box.bounding_radius + segment_length*sqrt(3.0);
+	const real_type max_distance = box.bounding_radius + segment_length;
 
 	vector_3 ray = ray_dir * segment_length;
 
