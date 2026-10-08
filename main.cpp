@@ -19,10 +19,55 @@
 
 
 
+// https://claude.ai/chat/9904d44d-7109-406e-8ccb-ebd63576858e
 
-const real_type spin = 0.999; // a_*
+
+const real_type spin = 0; // a_*
 const real_type theta = pi / 2.0;
-const real_type n_geometrized = 1e9; // field line count
+const real_type n_geometrized = 1e10; // field line count
+
+// --- derived ---
+const real_type spin_root = sqrt(1.0 - spin * spin);
+
+const real_type emitter_mass_geometrized =
+sqrt(n_geometrized * log(2.0) / (2.0 * pi * (1.0 + spin_root)));
+
+const real_type emitter_a_geometrized =
+sqrt(n_geometrized * log(2.0) * (1.0 - spin_root) / (2.0 * pi));
+
+const real_type emitter_r_plus_geometrized =
+sqrt(n_geometrized * log(2.0) * (1.0 + spin_root) / (2.0 * pi));
+
+const real_type emitter_area_geometrized =
+4.0 * n_geometrized * log(2.0);
+
+
+
+
+
+
+// ---------------------------------------------------------------------------
+// Kerr parameters, set once at the start of run_simulation (before any worker
+// thread is launched) and read-only afterwards.
+//
+// In Kerr-Schild Cartesian coordinates the outer horizon r_BL = r_+ is the
+// oblate spheroid
+//     (x^2 + y^2) / (r_+^2 + a^2) + z^2 / r_+^2 = 1
+// with equatorial radius rho_eq = sqrt(r_+^2 + a^2) and polar radius r_+.
+// ---------------------------------------------------------------------------
+real_type kerr_M = 0;      // mass
+real_type kerr_a = 0;      // a = spin * M
+real_type kerr_r_plus = 0; // polar radius of the horizon
+real_type kerr_rho_eq = 0; // equatorial radius of the horizon
+
+// Cartesian (Kerr-Schild) point -> Boyer-Lindquist r
+real_type bl_r(const vector_3& p, const real_type a)
+{
+	const real_type R2 = p.x * p.x + p.y * p.y + p.z * p.z;
+	const real_type a2 = a * a;
+	const real_type b = 0.5 * (R2 - a2);
+	return sqrt(b + sqrt(b * b + a2 * p.z * p.z));
+}
 
 
 
@@ -196,7 +241,8 @@ struct render_snapshot
 {
 	OBB receiver_box;
 	OBB forward_box;
-	real_type emitter_radius = 0;
+	real_type emitter_radius = 0; // polar radius r_+
+	real_type emitter_rho_eq = 0; // equatorial radius sqrt(r_+^2 + a^2)
 	size_t step = 0;
 	size_t step_count = 0;
 	bool valid = false;
@@ -213,6 +259,7 @@ void publish_render_state(
 	const OBB& receiver_box,
 	const OBB& forward_box,
 	const real_type emitter_radius,
+	const real_type emitter_rho_eq,
 	const size_t step,
 	const size_t step_count)
 {
@@ -220,6 +267,7 @@ void publish_render_state(
 	shared_snapshot.receiver_box = receiver_box;
 	shared_snapshot.forward_box = forward_box;
 	shared_snapshot.emitter_radius = emitter_radius;
+	shared_snapshot.emitter_rho_eq = emitter_rho_eq;
 	shared_snapshot.step = step;
 	shared_snapshot.step_count = step_count;
 	shared_snapshot.valid = true;
@@ -319,10 +367,56 @@ real_type intersect_OBB(
 	// one extra segment of margin covers segments that straddle that sphere.
 	const real_type max_distance = box.bounding_radius + segment_length;
 
-	vector_3 ray = ray_dir * segment_length;
+	// --- Kerr frame dragging -------------------------------------------
+	// M and a come from the globals set in run_simulation. The field line
+	// starts on the spheroidal horizon, so |ray_origin| is no longer r_+
+	// and cannot be used to recover M. The spin axis is +z.
+	const real_type M = kerr_M;
+	const real_type a = kerr_a;
+	const real_type a2 = a * a;
+
+	// Advances one segment: step straight along the current direction, then
+	// drag the new point and the direction around the spin axis by
+	// d_phi = omega(r, theta) * dt, with dt = segment_length (c = 1).
+	// omega = 2 M a r / A is the frame-dragging angular velocity, which
+	// falls off as ~2 M a / r^3, so lines twist strongly near the hole and
+	// straighten out far away. A rotation about z preserves |p|, so the
+	// march-out test below is unaffected by the twist.
+	auto advance = [&](const vector_3& p, vector_3& dir) -> vector_3
+		{
+			vector_3 next = p;
+			next += dir * segment_length;
+
+			if (spin == 0)
+				return next;
+
+			// omega is a function of Boyer-Lindquist (r, theta), not of the
+			// Cartesian radius: z = r cos(theta) in Kerr-Schild coordinates.
+			const real_type r = bl_r(next, a);
+			const real_type r2 = r * r;
+			real_type cos_th = (r > 0) ? next.z / r : 0.0;
+			if (cos_th > 1.0) cos_th = 1.0;
+			if (cos_th < -1.0) cos_th = -1.0;
+			const real_type sin2_th = 1.0 - cos_th * cos_th;
+
+			const real_type delta = r2 - 2.0 * M * r + a2;
+			const real_type r2a2 = r2 + a2;
+			const real_type A = r2a2 * r2a2 - a2 * delta * sin2_th;
+
+			const real_type omega = 2.0 * M * a * r / A;
+			const real_type d_phi = omega * segment_length;
+
+			next.rotate_z(d_phi);
+			dir.rotate_z(d_phi);
+
+			return next;
+		};
+
+	vector_3 dir = ray_dir;
+	dir.normalize();
 
 	vector_3 segment_start = ray_origin;
-	vector_3 segment_end = ray_origin + ray;
+	vector_3 segment_end = advance(segment_start, dir);
 
 	if (record_this_field_line)
 		record_field_line(segment_start, segment_end, true);
@@ -335,7 +429,7 @@ real_type intersect_OBB(
 			total_length += (segment_end - segment_start).length();
 
 		segment_start = segment_end;
-		segment_end += ray;
+		segment_end = advance(segment_start, dir);
 
 		if (record_this_field_line)
 			record_field_line(segment_start, segment_end, false);
@@ -498,6 +592,24 @@ vector_3 unit_square_to_sphere(const real_type u, const real_type v)
 	return vector_3(s * cos(a), s * sin(a), z);
 }
 
+// Stretch a point of the unit sphere onto the Kerr horizon spheroid.
+// The Kerr horizon area element is (r_+^2 + a^2) sin(theta) dtheta dphi,
+// i.e. uniform in cos(theta) and phi, so a uniformly distributed unit
+// vector maps to a uniformly (by proper area) distributed horizon point.
+vector_3 unit_sphere_to_horizon(const vector_3& u)
+{
+	return vector_3(u.x * kerr_rho_eq, u.y * kerr_rho_eq, u.z * kerr_r_plus);
+}
+
+// Outward unit normal of the horizon spheroid at a point on it
+vector_3 horizon_normal(const vector_3& p)
+{
+	const real_type re2 = kerr_rho_eq * kerr_rho_eq;
+	const real_type rp2 = kerr_r_plus * kerr_r_plus;
+	vector_3 n(p.x / re2, p.y / re2, p.z / rp2);
+	return n.normalize();
+}
+
 
 // Worker function for each thread
 void worker_thread(
@@ -538,14 +650,16 @@ void worker_thread(
 
 		//vector_3 location = unit_square_to_sphere(u[0], u[1]);
 
-		vector_3 location = random_unit_vector(local_gen, local_dis);
+		// Field line origin on the spheroidal horizon
+		//vector_3 location = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
 
-		location.x *= emitter_radius;
-		location.y *= emitter_radius;
-		location.z *= emitter_radius;
 
-		vector_3 surface_normal = location;
-		surface_normal.normalize();
+
+		real_type rho_eq = sqrt(emitter_r_plus_geometrized * emitter_r_plus_geometrized + emitter_a_geometrized * emitter_a_geometrized);
+		vector_3 u = random_unit_vector(local_gen, local_dis);
+		vector_3 location(u.x * rho_eq, u.y * rho_eq, u.z * emitter_r_plus_geometrized);
+
+		vector_3 surface_normal = horizon_normal(location);
 
 
 		// A) Newtonian gravitation
@@ -559,12 +673,14 @@ void worker_thread(
 
 		// C) Schwarzschild gravitation, quantum
 		//vector_3 r = unit_square_to_sphere(u[2], u[3]);
-		vector_3 r = random_unit_vector(local_gen, local_dis);
+		//vector_3 r = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
 
 
-		r.x *= emitter_radius;
-		r.y *= emitter_radius;
-		r.z *= emitter_radius;
+		rho_eq = sqrt(emitter_r_plus_geometrized * emitter_r_plus_geometrized + emitter_a_geometrized * emitter_a_geometrized);
+		u = random_unit_vector(local_gen, local_dis);
+		vector_3 r(u.x * rho_eq, u.y * rho_eq, u.z * emitter_r_plus_geometrized);
+
+
 
 		vector_3 normal = (location - r).normalize();
 
@@ -734,44 +850,111 @@ pair<real_type, real_type> get_intersecting_line_density(
 
 
 
-real_type expr(real_type r, real_type a, real_type M, real_type t)
+
+
+
+// d(eta)/dr in Boyer-Lindquist r, where eta = sqrt(Sigma Delta / A) is the
+// ZAMO lapse. With (Sigma Delta)' = 2 (r Delta + (r - M) Sigma) and
+// A' = 2 dA_half:
+//   eta' = [2 A (r Delta + (r - M) Sigma) - 2 Sigma Delta dA_half]
+//          / (2 A^(3/2) sqrt(Sigma Delta))
+real_type deta_dr(real_type r, real_type theta, real_type M, real_type a)
 {
-	const real_type a2 = a * a;
-	const real_type a4 = a2 * a2;
-	const real_type r2 = r * r;
-	const real_type r3 = r2 * r;
-	const real_type s = std::sin(t);
-	const real_type c = std::cos(t);
-	const real_type s2 = s * s;
-	const real_type c2 = c * c;
+	const real_type s2 = sin(theta) * sin(theta), c2 = 1.0 - s2;
+	const real_type r2a2 = r * r + a * a;
+	const real_type Sigma = r * r + a * a * c2;
+	const real_type Delta = r * r - 2.0 * M * r + a * a;
+	const real_type A = r2a2 * r2a2 - a * a * Delta * s2;
+	const real_type dA_half = 2.0 * r * r2a2 - a * a * (r - M) * s2;   // (dA/dr)/2
+	const real_type num = 2.0 * A * (r * Delta + (r - M) * Sigma) - 2.0 * Sigma * Delta * dA_half;
+	return num / (2.0 * pow(A, 1.5) * sqrt(Sigma * Delta));
+}
 
-	const real_type sum = a2 + r2;              // a^2 + r^2
-	const real_type delta = a2 + r * (r - 2.0 * M); // a^2 + r(r - 2M)
 
-	const real_type num =
-		r * (sum * (a4 + a2 * r * (r - 3.0 * M) + M * r3)
-			- a2 * s2 * delta * delta)
-		- a2 * sum * c2 * (a2 * (M + r) + r2 * (r - 3.0 * M));
+double expected_line_density(const double x, const double r_plus, const double rho_eq,
+	const int n_theta = 2000, const int n_phi = 4000)
+{
+	const double re2 = rho_eq * rho_eq, rp2 = r_plus * r_plus;
+	const double PI = 3.14159265358979323846;
+	const double d_theta = PI / n_theta, d_phi = 2.0 * PI / n_phi;
 
-	const real_type D = sum * sum - s2 * (a4 + a2 * r * (r - 2.0 * M));
+	double total = 0.0;
 
-	const real_type den = D * D * std::sqrt(delta * (a2 * c2 + r2) / D);
+	for (int i = 0; i < n_theta; i++)
+	{
+		const double T = (i + 0.5) * d_theta;
+		const double sT = sin(T), cT = cos(T);
+		const double mu = sT * d_theta * d_phi / (4.0 * PI);
 
-	return num / den;
+		for (int j = 0; j < n_phi; j++)
+		{
+			const double P = (j + 0.5) * d_phi;
+			const double yx = rho_eq * sT * cos(P), yy = rho_eq * sT * sin(P), yz = r_plus * cT;
+
+			// direction from y to the field point
+			double ux = x - yx, uy = -yy, uz = -yz;
+			const double dist = sqrt(ux * ux + uy * uy + uz * uz);
+			ux /= dist; uy /= dist; uz /= dist;
+
+			// y must face the field point
+			if (ux * yx / re2 + uy * yy / re2 + uz * yz / rp2 <= 0.0)
+				continue;
+
+			// other end of the chord: y - t u, t > 0
+			const double qa = (ux * ux + uy * uy) / re2 + uz * uz / rp2;
+			const double qb = -2.0 * ((yx * ux + yy * uy) / re2 + yz * uz / rp2);
+			const double t = -qb / qa;
+
+			if (t <= 0.0)
+				continue;
+
+			const double rx = yx - t * ux, ry = yy - t * uy, rz = yz - t * uz;
+
+			double nx = rx / re2, ny = ry / re2, nz = rz / rp2;
+			const double nlen = sqrt(nx * nx + ny * ny + nz * nz);
+			nx /= nlen; ny /= nlen; nz /= nlen;
+			const double cos_r = fabs(nx * ux + ny * uy + nz * uz);
+
+			if (cos_r < 1e-12)
+				continue;
+
+			// sampling density per Euclidean area at r*
+			double ct = rz / r_plus;
+			if (ct > 1.0) ct = 1.0;
+			if (ct < -1.0) ct = -1.0;
+			const double st = sqrt(1.0 - ct * ct);
+			const double dA = rho_eq * st * sqrt(r_plus * r_plus * st * st + rho_eq * rho_eq * ct * ct);
+
+			if (dA <= 0.0)
+				continue;
+
+			const double q = st / (4.0 * PI * dA);
+
+			total += mu * q * t * t / (cos_r * dist * dist);
+		}
+	}
+
+	return total;
+}
+
+real_type expected_a_flat(const real_type R, const real_type h)
+{
+	const double e = static_cast<double>(h) * 0.5;
+	const double rp = static_cast<double>(kerr_r_plus);
+	const double re = static_cast<double>(kerr_rho_eq);
+
+	const double f_minus = expected_line_density(static_cast<double>(R) - e, rp, re);
+	const double f_plus = expected_line_density(static_cast<double>(R) + e, rp, re);
+	const real_type df_dx = (f_plus - f_minus) / (2.0 * e) * n_geometrized;
+
+	// Normalised by r_+ instead of 2 M: n ln2 = 2 pi M r_+, so this makes the
+	// far field tend to M / R^2 at any spin (identical to 2 M at spin 0).
+	return -df_dx * R * log(2.0) / kerr_r_plus;
 }
 
 
 
-double deta_dr(double r, double theta, double M, double a) {
-	const double s2 = std::sin(theta) * std::sin(theta), c2 = 1.0 - s2;
-	const double r2a2 = r * r + a * a;
-	const double Sigma = r * r + a * a * c2;
-	const double Delta = r * r - 2.0 * M * r + a * a;
-	const double A = r2a2 * r2a2 - a * a * Delta * s2;
-	const double dA_half = 2.0 * r * r2a2 - a * a * (r - M) * s2;   // (dA/dr)/2
-	const double num = 2.0 * A * (r * Delta + (r - M) * Sigma) - Sigma * Delta * dA_half * 2.0 / 2.0 * 1.0;
-	return num / (2.0 * std::pow(A, 1.5) * std::sqrt(Sigma * Delta));
-}
+
 
 
 void run_simulation()
@@ -787,20 +970,18 @@ void run_simulation()
 
 
 
-	// --- derived ---
-	const real_type spin_root = sqrt(1.0 - spin * spin);
 
-	const real_type emitter_mass_geometrized =
-		sqrt(n_geometrized * log(2.0) / (2.0 * pi * (1.0 + spin_root)));
 
-	const real_type emitter_a_geometrized =
-		sqrt(n_geometrized * log(2.0) * (1.0 - spin_root) / (2.0 * pi));
+	// Equatorial radius of the horizon spheroid: sqrt(r_+^2 + a^2) = sqrt(2 M r_+)
+	const real_type emitter_rho_eq_geometrized =
+		sqrt(emitter_r_plus_geometrized * emitter_r_plus_geometrized
+			+ emitter_a_geometrized * emitter_a_geometrized);
 
-	const real_type emitter_r_plus_geometrized =
-		sqrt(n_geometrized * log(2.0) * (1.0 + spin_root) / (2.0 * pi));
-
-	const real_type emitter_area_geometrized =
-		4.0 * n_geometrized * log(2.0);
+	// Publish the Kerr parameters before any worker thread starts
+	kerr_M = emitter_mass_geometrized;
+	kerr_a = emitter_a_geometrized;
+	kerr_r_plus = emitter_r_plus_geometrized;
+	kerr_rho_eq = emitter_rho_eq_geometrized;
 
 
 
@@ -809,15 +990,16 @@ void run_simulation()
 
 
 
+	// The receiver sits on the equator (+x axis), so it must start just
+	// outside the spheroid's equatorial radius, not outside r_+.
 	real_type start_pos =
-		emitter_r_plus_geometrized
+		emitter_rho_eq_geometrized
 		+ receiver_radius_geometrized;
 
-	start_pos *= 2.0;
 
-	real_type end_pos = start_pos;// start_pos * 2.0;
+	real_type end_pos = start_pos * 2.0;
 
-	const size_t pos_res = 2; // Minimum 2 steps
+	const size_t pos_res = 10; // Minimum 2 steps
 
 	const real_type pos_step_size =
 		(end_pos - start_pos)
@@ -836,7 +1018,7 @@ void run_simulation()
 		const real_type receiver_distance_plus_geometrized =
 			receiver_distance_geometrized + epsilon;
 
-		segment_length = receiver_radius_geometrized / 10.0;// epsilon / 10.0;
+		segment_length = epsilon / 10.0;
 
 		// Hand the boxes for this step to the renderer
 		{
@@ -851,6 +1033,7 @@ void run_simulation()
 			publish_render_state(
 				receiver_box, forward_box,
 				emitter_r_plus_geometrized,
+				emitter_rho_eq_geometrized,
 				i + 1, pos_res);
 		}
 
@@ -927,30 +1110,33 @@ void run_simulation()
 
 
 
-		const real_type sigma = receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized * cos(theta) * cos(theta);
-		const real_type delta = receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized;
-		const real_type A = (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) - emitter_a_geometrized * emitter_a_geometrized * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * sin(theta) * sin(theta);
+		//const real_type sigma = receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized * cos(theta) * cos(theta);
+		//const real_type delta = receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized;
+		//const real_type A = (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) - emitter_a_geometrized * emitter_a_geometrized * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * sin(theta) * sin(theta);
 
 		//const real_type dt_Kerr = sqrt(sigma*delta/A);
 		//const real_type dt_Kerr = sqrt((receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized * cos(theta) * cos(theta)) * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) / ((receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) - emitter_a_geometrized * emitter_a_geometrized * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * sin(theta) * sin(theta)));
 
 
 
-//		const real_type a_Kerr_geometrized =
+		// receiver_distance_geometrized is a Cartesian distance (rho on the
+		// equator); deta_dr wants Boyer-Lindquist r. On the equator
+		// rho^2 = r^2 + a^2, and the numerical gradient is taken along
+		// Cartesian x, so convert with d(eta)/d(rho) = (rho / r) d(eta)/dr.
+		const vector_3 receiver_center(receiver_distance_geometrized, 0.0, 0.0);
+		const real_type receiver_r_BL = bl_r(receiver_center, emitter_a_geometrized);
+		const real_type drBL_drho = receiver_distance_geometrized / receiver_r_BL;
 
-//			(2.0/pi)*expr(receiver_distance_geometrized, emitter_a_geometrized, emitter_mass_geometrized, theta);
-
-
-		double a_Kerr_geometrized = (2.0 / pi) * deta_dr(receiver_distance_geometrized, theta, emitter_mass_geometrized, emitter_a_geometrized);
-
-		//cout << a_Kerr_geometrized << " " << a_Kerr_geometrized_ << endl;
-		//exit(0);
-
-			//emitter_r_plus_geometrized / (pi * pow(receiver_distance_geometrized, 2.0) * dt_Schwarzschild);
-
-
+		const real_type a_Kerr_geometrized =
+			(2.0 / pi) *    // drBL_drho  
+			deta_dr(receiver_r_BL, theta, emitter_mass_geometrized, emitter_a_geometrized);
 
 
+
+		const real_type a_flat_expected_geometrized =
+			expected_a_flat(receiver_distance_geometrized, receiver_radius_geometrized);
+
+		cout << a_flat_expected_geometrized / a_flat_geometrized << endl;
 
 
 		cout << "a_Kerr_geometrized " << a_Kerr_geometrized << endl;
@@ -1113,7 +1299,7 @@ vector_3 viz_cylinder_built_origin;
 float viz_cylinder_built_radius = -1.0f;
 
 const int viz_cylinder_sides = 8;
-float viz_field_line_radius_scale = 0.02f; // cylinder radius as a fraction of the receiver box size
+float viz_field_line_radius_scale = 0.0125f; // cylinder radius as a fraction of the receiver box size
 
 // Field line start markers: one low-poly unit sphere mesh, drawn instanced
 // (one instance per recorded field line) at each line's start point on the
@@ -1378,8 +1564,9 @@ bool viz_init_gl()
 	return true;
 }
 
-// Latitude / longitude wireframe of the emitter sphere, in world coordinates
-void viz_build_emitter_sphere(const real_type radius)
+// Latitude / longitude wireframe of the horizon spheroid, in world coordinates
+// (equatorial radius rho_eq, polar radius r_plus)
+void viz_build_emitter_sphere(const real_type r_plus, const real_type rho_eq)
 {
 	vector<float> v;
 
@@ -1388,9 +1575,9 @@ void viz_build_emitter_sphere(const real_type radius)
 
 	auto push_point = [&](const real_type theta, const real_type phi)
 		{
-			v.push_back(static_cast<float>(radius * sin(theta) * cos(phi)));
-			v.push_back(static_cast<float>(radius * sin(theta) * sin(phi)));
-			v.push_back(static_cast<float>(radius * cos(theta)));
+			v.push_back(static_cast<float>(rho_eq * sin(theta) * cos(phi)));
+			v.push_back(static_cast<float>(rho_eq * sin(theta) * sin(phi)));
+			v.push_back(static_cast<float>(r_plus * cos(theta)));
 		};
 
 	const real_type deg = pi / 180.0;
@@ -1636,7 +1823,7 @@ void viz_display()
 	}
 
 	if (viz_sphere_vertex_count == 0)
-		viz_build_emitter_sphere(snap.emitter_radius);
+		viz_build_emitter_sphere(snap.emitter_radius, snap.emitter_rho_eq);
 
 	viz_update_title(snap);
 
@@ -1657,7 +1844,7 @@ void viz_display()
 
 	const float aspect = static_cast<float>(viz_window_width) / static_cast<float>(viz_window_height > 0 ? viz_window_height : 1);
 	const float z_near = viz_camera_distance * 0.01f;
-	const float z_far = viz_camera_distance + static_cast<float>(4.0 * (snap.emitter_radius + snap.receiver_box.r));
+	const float z_far = viz_camera_distance + static_cast<float>(4.0 * (snap.emitter_rho_eq + snap.receiver_box.r));
 
 	const mat4f view_proj = mat4f_multiply(mat4f_perspective(0.8f, aspect, z_near, z_far), view);
 
