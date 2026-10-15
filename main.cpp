@@ -24,7 +24,7 @@
 
 const real_type spin = 0; // a_*
 const real_type theta = pi / 2.0;
-const real_type n_geometrized = 1e10; // field line count
+const real_type n_geometrized = 1e11; // field line count
 
 // --- derived ---
 const real_type spin_root = sqrt(1.0 - spin * spin);
@@ -43,6 +43,85 @@ const real_type emitter_area_geometrized =
 
 
 
+
+// ---------------------------------------------------------------------------
+// Analytical solution
+//
+// In options B and C every line leaves a uniform surface point with a
+// cosine-weighted (Lambertian) direction. (Joining two uniform points on a
+// sphere gives exactly this: dA_r = 4 R^2 cos(alpha) dOmega.)
+// A uniform Lambertian sphere has the same radiance in every direction, so the
+// track-length density per emitted line (summed chord length per unit volume) is
+//
+//     f(x) = Omega(x) / (4 pi^2 R^2),   Omega(x) = 2 pi (1 - sqrt(1 - R^2 / x^2))
+//
+// and a receiver box of volume V collects n f V of chord length.
+// ---------------------------------------------------------------------------
+
+real_type expected_line_density(const real_type x, const real_type R)
+{
+	if (x <= R)
+		return 0;
+
+	const real_type s = (R * R) / (x * x);
+	const real_type one_minus_cos = s / (1 + sqrt(1 - s)); // = 1 - sqrt(1 - s), no cancellation
+
+	return one_minus_cos / (2 * pi * R * R);
+}
+
+real_type expected_line_density_derivative(const real_type x, const real_type R)
+{
+	if (x <= R)
+		return 0;
+
+	return -1 / (2 * pi * x * x * x * sqrt(1 - (R * R) / (x * x)));
+}
+
+// Average of f over the receiver cube (centre (cx,0,0), half-side h),
+// 8-point Gauss-Legendre per axis.
+real_type expected_line_density_box(const real_type cx, const real_type h, const real_type R)
+{
+	static const real_type node[8] = {
+		-0.9602898564975363L, -0.7966664774136267L, -0.5255324099163290L, -0.1834346424956498L,
+		 0.1834346424956498L,  0.5255324099163290L,  0.7966664774136267L,  0.9602898564975363L };
+	static const real_type weight[8] = {
+		0.1012285362903763L, 0.2223810344533745L, 0.3137066458778873L, 0.3626837833783620L,
+		0.3626837833783620L, 0.3137066458778873L, 0.2223810344533745L, 0.1012285362903763L };
+
+	real_type sum = 0;
+
+	for (int i = 0; i < 8; i++)
+		for (int j = 0; j < 8; j++)
+			for (int k = 0; k < 8; k++)
+			{
+				const real_type px = cx + h * node[i], py = h * node[j], pz = h * node[k];
+				sum += weight[i] * weight[j] * weight[k] * expected_line_density(sqrt(px * px + py * py + pz * pz), R);
+			}
+
+	return sum / 8; // weights sum to 2 per axis
+}
+
+// Exact (point-receiver) acceleration:
+//   a = -n f'(x) x ln2 / R  =  M / (x^2 sqrt(1 - R^2 / x^2)),  with n ln2 = pi R^2, M = R / 2
+//real_type expected_a_flat(const real_type x, const real_type emitter_radius_geometrized)
+//{
+//	return -n_geometrized * expected_line_density_derivative(x, emitter_radius_geometrized)
+//		* x * log(2.0) / emitter_radius_geometrized;
+//}
+
+// Same quantity computed exactly the way the simulation computes it:
+// boxes of half-side h at x and x + eps, forward difference, same normalisation.
+real_type expected_a_flat_box(const real_type x, const real_type eps, const real_type h, const real_type emitter_radius_geometrized)
+{
+	const real_type V = 8 * h * h * h;
+	const real_type count = n_geometrized * expected_line_density_box(x, h, emitter_radius_geometrized) * V;
+	const real_type count_plus = n_geometrized * expected_line_density_box(x + eps, h, emitter_radius_geometrized) * V;
+
+	const real_type gradient_integer = (count_plus - count) / eps;
+	const real_type gradient_strength = -gradient_integer / (2 * h * h * h);
+
+	return gradient_strength * x * log(2.0) / (8.0 * emitter_mass_geometrized);
+}
 
 
 
@@ -1136,7 +1215,18 @@ void run_simulation()
 		const real_type a_flat_expected_geometrized =
 			expected_a_flat(receiver_distance_geometrized, receiver_radius_geometrized);
 
-		cout << a_flat_expected_geometrized / a_flat_geometrized << endl;
+
+		const real_type a_flat_expected_box_geometrized =
+			expected_a_flat_box(receiver_distance_geometrized, epsilon, receiver_radius_geometrized, emitter_r_plus_geometrized);
+
+		cout << a_flat_geometrized / a_flat_expected_box_geometrized << endl;
+
+
+
+		//cout << a_flat_expected_geometrized / a_flat_expected_box_geometrized << endl;
+
+
+		//cout << a_flat_expected_geometrized / a_flat_geometrized << endl;
 
 
 		cout << "a_Kerr_geometrized " << a_Kerr_geometrized << endl;
