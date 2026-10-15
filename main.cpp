@@ -24,7 +24,7 @@
 
 const real_type spin = 0; // a_*
 const real_type theta = pi / 2.0;
-const real_type n_geometrized = 1e11; // field line count
+const real_type n_geometrized = 1e9; // field line count
 
 // --- derived ---
 const real_type spin_root = sqrt(1.0 - spin * spin);
@@ -101,13 +101,7 @@ real_type expected_line_density_box(const real_type cx, const real_type h, const
 	return sum / 8; // weights sum to 2 per axis
 }
 
-// Exact (point-receiver) acceleration:
-//   a = -n f'(x) x ln2 / R  =  M / (x^2 sqrt(1 - R^2 / x^2)),  with n ln2 = pi R^2, M = R / 2
-//real_type expected_a_flat(const real_type x, const real_type emitter_radius_geometrized)
-//{
-//	return -n_geometrized * expected_line_density_derivative(x, emitter_radius_geometrized)
-//		* x * log(2.0) / emitter_radius_geometrized;
-//}
+
 
 // Same quantity computed exactly the way the simulation computes it:
 // boxes of half-side h at x and x + eps, forward difference, same normalisation.
@@ -1016,20 +1010,6 @@ double expected_line_density(const double x, const double r_plus, const double r
 	return total;
 }
 
-real_type expected_a_flat(const real_type R, const real_type h)
-{
-	const double e = static_cast<double>(h) * 0.5;
-	const double rp = static_cast<double>(kerr_r_plus);
-	const double re = static_cast<double>(kerr_rho_eq);
-
-	const double f_minus = expected_line_density(static_cast<double>(R) - e, rp, re);
-	const double f_plus = expected_line_density(static_cast<double>(R) + e, rp, re);
-	const real_type df_dx = (f_plus - f_minus) / (2.0 * e) * n_geometrized;
-
-	// Normalised by r_+ instead of 2 M: n ln2 = 2 pi M r_+, so this makes the
-	// far field tend to M / R^2 at any spin (identical to 2 M at spin 0).
-	return -df_dx * R * log(2.0) / kerr_r_plus;
-}
 
 
 
