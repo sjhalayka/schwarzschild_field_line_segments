@@ -22,7 +22,7 @@
 // https://claude.ai/chat/9904d44d-7109-406e-8ccb-ebd63576858e
 
 
-const real_type spin = 0; // a_*
+const real_type spin = 0.999; // a_*
 const real_type theta = pi / 2.0;
 const real_type n_geometrized = 1e9; // field line count
 
@@ -77,25 +77,113 @@ real_type expected_line_density_derivative(const real_type x, const real_type R)
 	return -1 / (2 * pi * x * x * x * sqrt(1 - (R * R) / (x * x)));
 }
 
-// Average of f over the receiver cube (centre (cx,0,0), half-side h),
-// 8-point Gauss-Legendre per axis.
-real_type expected_line_density_box(const real_type cx, const real_type h, const real_type R)
-{
-	static const real_type node[8] = {
-		-0.9602898564975363L, -0.7966664774136267L, -0.5255324099163290L, -0.1834346424956498L,
-		 0.1834346424956498L,  0.5255324099163290L,  0.7966664774136267L,  0.9602898564975363L };
-	static const real_type weight[8] = {
-		0.1012285362903763L, 0.2223810344533745L, 0.3137066458778873L, 0.3626837833783620L,
-		0.3626837833783620L, 0.3137066458778873L, 0.2223810344533745L, 0.1012285362903763L };
+// 8-point Gauss-Legendre nodes and weights on [-1, 1] (weights sum to 2)
+static const real_type gl8_node[8] = {
+	-0.9602898564975363L, -0.7966664774136267L, -0.5255324099163290L, -0.1834346424956498L,
+	 0.1834346424956498L,  0.5255324099163290L,  0.7966664774136267L,  0.9602898564975363L };
+static const real_type gl8_weight[8] = {
+	0.1012285362903763L, 0.2223810344533745L, 0.3137066458778873L, 0.3626837833783620L,
+	0.3626837833783620L, 0.3137066458778873L, 0.2223810344533745L, 0.1012285362903763L };
 
+
+
+// ---------------------------------------------------------------------------
+// Kerr (spheroidal) generalisation of expected_line_density
+//
+// The simulation draws both chord ends as uniform unit vectors stretched by
+//     S = diag(rho_eq, rho_eq, r_+),   rho_eq = sqrt(r_+^2 + a^2)
+// In the unstretched frame the emitter is the unit sphere with uniformly
+// distributed chord ends: the Lambertian case above with R = 1, radiance
+// 1 / (4 pi^2). Mapping back by S stretches a chord with unstretched
+// direction d' by |S d'| and every volume by det S, so
+//
+//     f(p) = 1 / (4 pi^2 det S) * Integral |S d'| dOmega'
+//
+// over the tangent cone from p' = S^-1 p to the unit sphere. That cone is
+// circular and |S d'| is smooth, so Gauss-Legendre in cos(alpha) times a
+// trapezoid rule in the azimuth converges very quickly.
+// For a = 0, |S d'| = R and this reduces exactly to Omega / (4 pi^2 R^2).
+// ---------------------------------------------------------------------------
+real_type expected_line_density_kerr(
+	const real_type px, const real_type py, const real_type pz,
+	const real_type r_plus, const real_type a)
+{
+	const real_type rho_eq = sqrt(r_plus * r_plus + a * a);
+
+	// Field point in the unstretched frame
+	const real_type qx = px / rho_eq, qy = py / rho_eq, qz = pz / r_plus;
+	const real_type q_len = sqrt(qx * qx + qy * qy + qz * qz);
+
+	if (q_len <= 1)
+		return 0; // on or inside the horizon
+
+	// Cone axis (toward the emitter centre) and an orthonormal pair around it
+	const vector_3 w(-qx / q_len, -qy / q_len, -qz / q_len);
+	const vector_3 helper = (fabs(w.x) < 0.9) ? vector_3(1, 0, 0) : vector_3(0, 1, 0);
+	vector_3 e1 = w.cross(helper);
+	e1.normalize();
+	const vector_3 e2 = w.cross(e1);
+
+	// Cone half-angle: sin(alpha_max) = 1 / |p'|
+	const real_type cos_max = sqrt(1 - 1 / (q_len * q_len));
+
+	const int n_phi = 32;
+	const real_type d_phi = 2 * pi / n_phi;
+	const real_type half_span = 0.5 * (1 - cos_max); // cos(alpha) runs over [cos_max, 1]
+	const real_type mid = 0.5 * (1 + cos_max);
+
+	real_type sum = 0;
+
+	for (int i = 0; i < 8; i++)
+	{
+		const real_type ca = mid + half_span * gl8_node[i];
+		const real_type sa = sqrt(fmax(0.0, 1 - ca * ca));
+
+		real_type ring = 0;
+
+		for (int j = 0; j < n_phi; j++)
+		{
+			const real_type ph = (j + 0.5) * d_phi;
+			const real_type c = sa * cos(ph), s = sa * sin(ph);
+
+			// Unstretched unit direction d'
+			const real_type dx = ca * w.x + c * e1.x + s * e2.x;
+			const real_type dy = ca * w.y + c * e1.y + s * e2.y;
+			const real_type dz = ca * w.z + c * e1.z + s * e2.z;
+
+			// |S d'|
+			ring += sqrt(rho_eq * rho_eq * (dx * dx + dy * dy) + r_plus * r_plus * dz * dz);
+		}
+
+		sum += gl8_weight[i] * half_span * ring * d_phi;
+	}
+
+	const real_type det_S = rho_eq * rho_eq * r_plus;
+
+	return sum / (4 * pi * pi * det_S);
+}
+
+
+
+// Average of f over the receiver cube (centre (cx,0,0), half-side h),
+// 8-point Gauss-Legendre per axis. The emitter is the Kerr horizon spheroid
+// with polar radius r_plus and equatorial radius sqrt(r_plus^2 + a^2);
+// a = 0 uses the closed-form sphere result.
+real_type expected_line_density_box(const real_type cx, const real_type h, const real_type r_plus, const real_type a)
+{
 	real_type sum = 0;
 
 	for (int i = 0; i < 8; i++)
 		for (int j = 0; j < 8; j++)
 			for (int k = 0; k < 8; k++)
 			{
-				const real_type px = cx + h * node[i], py = h * node[j], pz = h * node[k];
-				sum += weight[i] * weight[j] * weight[k] * expected_line_density(sqrt(px * px + py * py + pz * pz), R);
+				const real_type px = cx + h * gl8_node[i], py = h * gl8_node[j], pz = h * gl8_node[k];
+
+				const real_type f = (a == 0)
+					? expected_line_density(sqrt(px * px + py * py + pz * pz), r_plus)
+					: expected_line_density_kerr(px, py, pz, r_plus, a);
+
+				sum += gl8_weight[i] * gl8_weight[j] * gl8_weight[k] * f;
 			}
 
 	return sum / 8; // weights sum to 2 per axis
@@ -105,11 +193,12 @@ real_type expected_line_density_box(const real_type cx, const real_type h, const
 
 // Same quantity computed exactly the way the simulation computes it:
 // boxes of half-side h at x and x + eps, forward difference, same normalisation.
-real_type expected_a_flat_box(const real_type x, const real_type eps, const real_type h, const real_type emitter_radius_geometrized)
+// r_plus is the polar horizon radius and a the Kerr spin parameter (a = spin * M).
+real_type expected_a_flat_box(const real_type x, const real_type eps, const real_type h, const real_type r_plus, const real_type a)
 {
 	const real_type V = 8 * h * h * h;
-	const real_type count = n_geometrized * expected_line_density_box(x, h, emitter_radius_geometrized) * V;
-	const real_type count_plus = n_geometrized * expected_line_density_box(x + eps, h, emitter_radius_geometrized) * V;
+	const real_type count = n_geometrized * expected_line_density_box(x, h, r_plus, a) * V;
+	const real_type count_plus = n_geometrized * expected_line_density_box(x + eps, h, r_plus, a) * V;
 
 	const real_type gradient_integer = (count_plus - count) / eps;
 	const real_type gradient_strength = -gradient_integer / (2 * h * h * h);
@@ -1194,7 +1283,7 @@ void run_simulation()
 
 
 		const real_type a_flat_expected_box_geometrized =
-			expected_a_flat_box(receiver_distance_geometrized, epsilon, receiver_radius_geometrized, emitter_r_plus_geometrized);
+			expected_a_flat_box(receiver_distance_geometrized, epsilon, receiver_radius_geometrized, emitter_r_plus_geometrized, emitter_a_geometrized);
 
 		cout << a_flat_geometrized / a_flat_expected_box_geometrized << endl;
 
@@ -1214,14 +1303,14 @@ void run_simulation()
 		cout << "a_flat_geometrized_forward " << a_flat_geometrized_forward << endl;
 
 
-		cout << a_Kerr_geometrized / a_flat_geometrized << endl;
-		cout << endl;
-
-		//cout << a_Schwarzschild_geometrized / a_flat_geometrized_forward << endl;
+		//cout << a_Kerr_geometrized / a_flat_geometrized << endl;
 		//cout << endl;
 
-		cout << a_Newton_geometrized / a_flat_geometrized << endl;
-		cout << endl << endl;
+		////cout << a_Schwarzschild_geometrized / a_flat_geometrized_forward << endl;
+		////cout << endl;
+
+		//cout << a_Newton_geometrized / a_flat_geometrized << endl;
+		//cout << endl << endl;
 
 
 		outfile_numerical << receiver_distance_geometrized << " " << a_flat_geometrized << endl;
