@@ -1192,9 +1192,6 @@ void run_simulation()
 
 
 
-		const real_type a_flat_expected_geometrized =
-			expected_a_flat(receiver_distance_geometrized, receiver_radius_geometrized);
-
 
 		const real_type a_flat_expected_box_geometrized =
 			expected_a_flat_box(receiver_distance_geometrized, epsilon, receiver_radius_geometrized, emitter_r_plus_geometrized);
