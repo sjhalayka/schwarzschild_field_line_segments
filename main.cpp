@@ -20,11 +20,14 @@
 
 
 // https://claude.ai/chat/9904d44d-7109-406e-8ccb-ebd63576858e
+template <typename T>
+constexpr T lerp(T a, T b, T t) {
+	return a + t * (b - a);
+}
 
-
-const real_type spin = 0.999; // a_*
+const real_type spin = 0.75; // a_*
 const real_type theta = pi / 2.0;
-const real_type n_geometrized = 1e9; // field line count
+const real_type n_geometrized = 1e10; // field line count
 
 // --- derived ---
 const real_type spin_root = sqrt(1.0 - spin * spin);
@@ -1268,15 +1271,19 @@ void run_simulation()
 
 
 		// receiver_distance_geometrized is a Cartesian distance (rho on the
-		// equator); deta_dr wants Boyer-Lindquist r. On the equator
+		// equator); deta_dr wants Boyer-Lindquist r. On the equator	
 		// rho^2 = r^2 + a^2, and the numerical gradient is taken along
 		// Cartesian x, so convert with d(eta)/d(rho) = (rho / r) d(eta)/dr.
 		const vector_3 receiver_center(receiver_distance_geometrized, 0.0, 0.0);
 		const real_type receiver_r_BL = bl_r(receiver_center, emitter_a_geometrized);
 		const real_type drBL_drho = receiver_distance_geometrized / receiver_r_BL;
 
+		cout << "drBL_drho " << drBL_drho << endl;
+
 		const real_type a_Kerr_geometrized =
-			(2.0 / pi) *    // drBL_drho  
+			lerp(2, 8, pow(spin, 5.0)) *
+			drBL_drho *
+			(1 / pi) * 
 			deta_dr(receiver_r_BL, theta, emitter_mass_geometrized, emitter_a_geometrized);
 
 
@@ -1285,7 +1292,7 @@ void run_simulation()
 		const real_type a_flat_expected_box_geometrized =
 			expected_a_flat_box(receiver_distance_geometrized, epsilon, receiver_radius_geometrized, emitter_r_plus_geometrized, emitter_a_geometrized);
 
-		cout << a_flat_geometrized / a_flat_expected_box_geometrized << endl;
+		//cout << a_flat_geometrized / a_flat_expected_box_geometrized << endl;
 
 
 
@@ -1301,10 +1308,12 @@ void run_simulation()
 		cout << "a_Newton_geometrized " << a_Newton_geometrized << endl;
 		cout << "a_flat_geometrized " << a_flat_geometrized << endl;
 		cout << "a_flat_geometrized_forward " << a_flat_geometrized_forward << endl;
+		cout << "a_flat_expected_box_geometrized " << a_flat_expected_box_geometrized << endl;
 
+		cout << a_Kerr_geometrized / a_flat_geometrized << endl;
+		cout << a_Kerr_geometrized / a_flat_expected_box_geometrized << endl;
 
-		//cout << a_Kerr_geometrized / a_flat_geometrized << endl;
-		//cout << endl;
+		cout << endl;
 
 		////cout << a_Schwarzschild_geometrized / a_flat_geometrized_forward << endl;
 		////cout << endl;
