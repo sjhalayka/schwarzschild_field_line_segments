@@ -15,7 +15,7 @@
 #include <iomanip>
 #include <limits>
 #include <cstdint>
-
+#include <map>
 
 
 
@@ -25,24 +25,83 @@ constexpr T lerp(T a, T b, T t) {
 	return a + t * (b - a);
 }
 
-const real_type spin = 0.75; // a_*
+real_type spin = 0.0; // a_*, changed by the spin sweep in run_simulation
 const real_type theta = pi / 2.0;
 const real_type n_geometrized = 1e10; // field line count
 
-// --- derived ---
-const real_type spin_root = sqrt(1.0 - spin * spin);
 
-const real_type emitter_mass_geometrized =
-sqrt(n_geometrized * log(2.0) / (2.0 * pi * (1.0 + spin_root)));
 
-const real_type emitter_a_geometrized =
-sqrt(n_geometrized * log(2.0) * (1.0 - spin_root) / (2.0 * pi));
+// ---------------------------------------------------------------------------
+// Spin-dependent emitter parameters
+//
+// These used to be const globals computed once at startup from spin = 0.75,
+// so the spin sweep never changed the black hole. They are now recomputed by
+// set_spin_parameters() at the start of every sweep step, before any worker
+// thread is launched, and are read-only while the workers run.
+// ---------------------------------------------------------------------------
+real_type spin_root = 0;
+real_type emitter_mass_geometrized = 0;
+real_type emitter_a_geometrized = 0;
+real_type emitter_r_plus_geometrized = 0;
+real_type emitter_rho_eq_geometrized = 0;
+real_type emitter_area_geometrized = 0;
 
-const real_type emitter_r_plus_geometrized =
-sqrt(n_geometrized * log(2.0) * (1.0 + spin_root) / (2.0 * pi));
+// Kerr parameters used by the field line march (same values as above)
+real_type kerr_M = 0;      // mass
+real_type kerr_a = 0;      // a = spin * M
+real_type kerr_r_plus = 0; // polar radius of the horizon
+real_type kerr_rho_eq = 0; // equatorial radius of the horizon
 
-const real_type emitter_area_geometrized =
-4.0 * n_geometrized * log(2.0);
+void set_spin_parameters(const real_type s)
+{
+	spin = s;
+	spin_root = sqrt(1.0 - spin * spin);
+
+	emitter_mass_geometrized =
+		sqrt(n_geometrized * log(2.0) / (2.0 * pi * (1.0 + spin_root)));
+
+	emitter_a_geometrized =
+		sqrt(n_geometrized * log(2.0) * (1.0 - spin_root) / (2.0 * pi));
+
+	emitter_r_plus_geometrized =
+		sqrt(n_geometrized * log(2.0) * (1.0 + spin_root) / (2.0 * pi));
+
+	// Equatorial radius of the horizon spheroid: sqrt(r_+^2 + a^2) = sqrt(2 M r_+)
+	emitter_rho_eq_geometrized =
+		sqrt(emitter_r_plus_geometrized * emitter_r_plus_geometrized
+			+ emitter_a_geometrized * emitter_a_geometrized);
+
+	emitter_area_geometrized = 4.0 * n_geometrized * log(2.0);
+
+	kerr_M = emitter_mass_geometrized;
+	kerr_a = emitter_a_geometrized;
+	kerr_r_plus = emitter_r_plus_geometrized;
+	kerr_rho_eq = emitter_rho_eq_geometrized;
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Candidate prefactor for the Kerr acceleration
+//
+//     k(a*) = 2 (2M / r_+)^2 = 8 / (1 + sqrt(1 - a*^2))^2
+//
+// k = 2 at a* = 0 (reproduces the Schwarzschild result) and k -> 8 at a* = 1.
+// In lerp form, lerp(2, 8, t) with t = ((2M / r_+)^2 - 1) / 3.
+// Near a* = 0, t ~ a*^2 / 6; near a* = 1 the slope diverges, which no
+// pow(spin, p) can reproduce.
+// ---------------------------------------------------------------------------
+real_type kerr_lerp_t(const real_type M, const real_type r_plus)
+{
+	const real_type ratio = 2.0 * M / r_plus;
+	return (ratio * ratio - 1.0) / 3.0;
+}
+
+real_type kerr_prefactor(const real_type M, const real_type r_plus)
+{
+	// Explicit template argument: lerp(2, 8, t) would deduce T as both int and long double
+	return lerp<real_type>(2.0, 8.0, kerr_lerp_t(M, r_plus));
+}
 
 
 
@@ -212,18 +271,11 @@ real_type expected_a_flat_box(const real_type x, const real_type eps, const real
 
 
 // ---------------------------------------------------------------------------
-// Kerr parameters, set once at the start of run_simulation (before any worker
-// thread is launched) and read-only afterwards.
-//
 // In Kerr-Schild Cartesian coordinates the outer horizon r_BL = r_+ is the
 // oblate spheroid
 //     (x^2 + y^2) / (r_+^2 + a^2) + z^2 / r_+^2 = 1
 // with equatorial radius rho_eq = sqrt(r_+^2 + a^2) and polar radius r_+.
 // ---------------------------------------------------------------------------
-real_type kerr_M = 0;      // mass
-real_type kerr_a = 0;      // a = spin * M
-real_type kerr_r_plus = 0; // polar radius of the horizon
-real_type kerr_rho_eq = 0; // equatorial radius of the horizon
 
 // Cartesian (Kerr-Schild) point -> Boyer-Lindquist r
 real_type bl_r(const vector_3& p, const real_type a)
@@ -387,9 +439,9 @@ void make_receiver_boxes(
 		0.0,
 		vector_3(receiver_radius, receiver_radius, receiver_radius));
 
-	// Same orientation, shifted by epsilon along world +x and world +z
+	// Same orientation, shifted by epsilon along world +x
 	right_box = translate_OBB(receiver_box, vector_3(epsilon, 0.0, 0.0));
-	//	forward_box = translate_OBB(receiver_box, vector_3(0.0, 0.0, epsilon));
+
 	forward_box = make_radial_OBB(
 		receiver_distance,
 		theta,
@@ -461,10 +513,6 @@ const long long unsigned int max_recorded_field_lines
 
 
 
-
-
-
-
 struct field_line
 {
 	vector_3 start, end;
@@ -533,9 +581,9 @@ real_type intersect_OBB(
 	const real_type max_distance = box.bounding_radius + segment_length;
 
 	// --- Kerr frame dragging -------------------------------------------
-	// M and a come from the globals set in run_simulation. The field line
-	// starts on the spheroidal horizon, so |ray_origin| is no longer r_+
-	// and cannot be used to recover M. The spin axis is +z.
+	// M and a come from the globals set by set_spin_parameters. The field
+	// line starts on the spheroidal horizon, so |ray_origin| is no longer
+	// r_+ and cannot be used to recover M. The spin axis is +z.
 	const real_type M = kerr_M;
 	const real_type a = kerr_a;
 	const real_type a2 = a * a;
@@ -552,7 +600,7 @@ real_type intersect_OBB(
 			vector_3 next = p;
 			next += dir * segment_length;
 
-			if (spin == 0)
+			if (a == 0)
 				return next;
 
 			// omega is a function of Boyer-Lindquist (r, theta), not of the
@@ -599,7 +647,6 @@ real_type intersect_OBB(
 		if (record_this_field_line)
 			record_field_line(segment_start, segment_end, false);
 	}
-
 
 	return total_length;
 }
@@ -798,7 +845,6 @@ void worker_thread(
 	real_type local_count_plus = 0;
 	real_type local_count_forward = 0;
 
-
 	// The receiver boxes do not depend on the iteration, so build them once.
 	OBB receiver_box, right_box, forward_box;
 	make_receiver_boxes(receiver_distance, receiver_radius, epsilon, receiver_box, right_box, forward_box);
@@ -809,54 +855,17 @@ void worker_thread(
 
 	for (long long unsigned int i = start_idx; i < end_idx; i++)
 	{
-		// One low-discrepancy sample of S2 x S2 per field line
-		//real_type u[4];
-		//qmc_sample_4d(i, u);
-
-		//vector_3 location = unit_square_to_sphere(u[0], u[1]);
-
-		// Field line origin on the spheroidal horizon
-		//vector_3 location = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
-
-
-
-		real_type rho_eq = sqrt(emitter_r_plus_geometrized * emitter_r_plus_geometrized + emitter_a_geometrized * emitter_a_geometrized);
-		vector_3 u = random_unit_vector(local_gen, local_dis);
-		vector_3 location(u.x * rho_eq, u.y * rho_eq, u.z * emitter_r_plus_geometrized);
-
-		vector_3 surface_normal = horizon_normal(location);
-
-
-		// A) Newtonian gravitation
-		//vector_3 normal =
-		//	surface_normal;
-
-		// B) Schwarzschild gravitation, classical
-		//vector_3 normal = 
-		//	random_cosine_weighted_hemisphere(
-		//		surface_normal, local_gen, local_dis);
-
-		// C) Schwarzschild gravitation, quantum
-		//vector_3 r = unit_square_to_sphere(u[2], u[3]);
-		//vector_3 r = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
-
-
-		rho_eq = sqrt(emitter_r_plus_geometrized * emitter_r_plus_geometrized + emitter_a_geometrized * emitter_a_geometrized);
-		u = random_unit_vector(local_gen, local_dis);
-		vector_3 r(u.x * rho_eq, u.y * rho_eq, u.z * emitter_r_plus_geometrized);
-
-
+		// C) Schwarzschild / Kerr gravitation, quantum:
+		// both chord ends are uniform points on the current horizon spheroid
+		const vector_3 location = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
+		const vector_3 r = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
 
 		vector_3 normal = (location - r).normalize();
-
-
 
 		// The same field line is traced against all three boxes; record it once
 		local_count += intersect(location, normal, receiver_box, true);
 		local_count_plus += intersect(location, normal, right_box);
 		local_count_forward += intersect(location, normal, forward_box);
-
-
 
 		// Update global progress periodically
 		local_progress++;
@@ -1007,17 +1016,6 @@ pair<real_type, real_type> get_intersecting_line_density(
 
 
 
-
-
-
-
-
-
-
-
-
-
-
 // d(eta)/dr in Boyer-Lindquist r, where eta = sqrt(Sigma Delta / A) is the
 // ZAMO lapse. With (Sigma Delta)' = 2 (r Delta + (r - M) Sigma) and
 // A' = 2 dA_half:
@@ -1036,135 +1034,49 @@ real_type deta_dr(real_type r, real_type theta, real_type M, real_type a)
 }
 
 
-double expected_line_density(const double x, const double r_plus, const double rho_eq,
-	const int n_theta = 2000, const int n_phi = 4000)
-{
-	const double re2 = rho_eq * rho_eq, rp2 = r_plus * r_plus;
-	const double PI = 3.14159265358979323846;
-	const double d_theta = PI / n_theta, d_phi = 2.0 * PI / n_phi;
-
-	double total = 0.0;
-
-	for (int i = 0; i < n_theta; i++)
-	{
-		const double T = (i + 0.5) * d_theta;
-		const double sT = sin(T), cT = cos(T);
-		const double mu = sT * d_theta * d_phi / (4.0 * PI);
-
-		for (int j = 0; j < n_phi; j++)
-		{
-			const double P = (j + 0.5) * d_phi;
-			const double yx = rho_eq * sT * cos(P), yy = rho_eq * sT * sin(P), yz = r_plus * cT;
-
-			// direction from y to the field point
-			double ux = x - yx, uy = -yy, uz = -yz;
-			const double dist = sqrt(ux * ux + uy * uy + uz * uz);
-			ux /= dist; uy /= dist; uz /= dist;
-
-			// y must face the field point
-			if (ux * yx / re2 + uy * yy / re2 + uz * yz / rp2 <= 0.0)
-				continue;
-
-			// other end of the chord: y - t u, t > 0
-			const double qa = (ux * ux + uy * uy) / re2 + uz * uz / rp2;
-			const double qb = -2.0 * ((yx * ux + yy * uy) / re2 + yz * uz / rp2);
-			const double t = -qb / qa;
-
-			if (t <= 0.0)
-				continue;
-
-			const double rx = yx - t * ux, ry = yy - t * uy, rz = yz - t * uz;
-
-			double nx = rx / re2, ny = ry / re2, nz = rz / rp2;
-			const double nlen = sqrt(nx * nx + ny * ny + nz * nz);
-			nx /= nlen; ny /= nlen; nz /= nlen;
-			const double cos_r = fabs(nx * ux + ny * uy + nz * uz);
-
-			if (cos_r < 1e-12)
-				continue;
-
-			// sampling density per Euclidean area at r*
-			double ct = rz / r_plus;
-			if (ct > 1.0) ct = 1.0;
-			if (ct < -1.0) ct = -1.0;
-			const double st = sqrt(1.0 - ct * ct);
-			const double dA = rho_eq * st * sqrt(r_plus * r_plus * st * st + rho_eq * rho_eq * ct * ct);
-
-			if (dA <= 0.0)
-				continue;
-
-			const double q = st / (4.0 * PI * dA);
-
-			total += mu * q * t * t / (cos_r * dist * dist);
-		}
-	}
-
-	return total;
-}
-
-
-
-
-
-
 
 void run_simulation()
 {
-	ofstream outfile_numerical("Schwarzschild_numerical");
-	ofstream outfile_analytical("Schwarzschild_analytical");
-	ofstream outfile_Newton("Newton_analytical");
+	// spin, k_needed (from the simulation), k_guess (candidate formula), ratio
+	ofstream outfile_k("Kerr_prefactor");
+	// receiver distance, a	_flat (simulation), a_Kerr (candidate formula)
+	ofstream outfile_numerical("Kerr_numerical");
+	ofstream outfile_analytical("Kerr_analytical");
 
+	const size_t spin_steps = 10;
 
-
-
-
-
-
-
-
-
-	// Equatorial radius of the horizon spheroid: sqrt(r_+^2 + a^2) = sqrt(2 M r_+)
-	const real_type emitter_rho_eq_geometrized =
-		sqrt(emitter_r_plus_geometrized * emitter_r_plus_geometrized
-			+ emitter_a_geometrized * emitter_a_geometrized);
-
-	// Publish the Kerr parameters before any worker thread starts
-	kerr_M = emitter_mass_geometrized;
-	kerr_a = emitter_a_geometrized;
-	kerr_r_plus = emitter_r_plus_geometrized;
-	kerr_rho_eq = emitter_rho_eq_geometrized;
-
-
-
-	const real_type receiver_radius_geometrized =
-		emitter_r_plus_geometrized * 0.01; // Minimum one Planck unit
-
-
-
-	// The receiver sits on the equator (+x axis), so it must start just
-	// outside the spheroid's equatorial radius, not outside r_+.
-	real_type start_pos =
-		emitter_rho_eq_geometrized
-		+ receiver_radius_geometrized;
-
-
-	real_type end_pos = start_pos * 2.0;
-
-	const size_t pos_res = 10; // Minimum 2 steps
-
-	const real_type pos_step_size =
-		(end_pos - start_pos)
-		/ (pos_res - 1);
-
-	const real_type epsilon =
-		receiver_radius_geometrized;
-
-	for (size_t i = 0; i < pos_res; i++)
+	// Integer counter, so spin does not drift from repeated += 0.1
+	for (size_t si = 1; si <= spin_steps; si++)
 	{
-		cout << "\n=== Step " << (i + 1) << " of " << pos_res << " ===" << endl;
+		if (abort_requested.load(std::memory_order_relaxed))
+			break;
 
+		real_type this_spin = static_cast<real_type>(si) / static_cast<real_type>(spin_steps);
+
+		// a* = 1 is extremal (r_+ = M); stay just below it
+		if (this_spin > 0.999)
+			this_spin = 0.999;
+
+		// Recompute M, a, r_+, rho_eq for this spin (before any worker starts)
+		set_spin_parameters(this_spin);
+
+		cout << "\n=== spin " << spin << " (" << si << " of " << spin_steps << ") ===" << endl;
+		cout << "M " << emitter_mass_geometrized
+			<< "  a " << emitter_a_geometrized
+			<< "  r_+ " << emitter_r_plus_geometrized
+			<< "  rho_eq " << emitter_rho_eq_geometrized << endl;
+
+		const real_type receiver_radius_geometrized =
+			emitter_r_plus_geometrized * 0.01; // Minimum one Planck unit
+
+		const real_type epsilon =
+			receiver_radius_geometrized;
+
+		// The receiver sits on the equator (+x axis), so it must start just
+		// outside the spheroid's equatorial radius, not outside r_+.
 		const real_type receiver_distance_geometrized =
-			start_pos + i * pos_step_size;
+			emitter_rho_eq_geometrized
+			+ receiver_radius_geometrized;
 
 		const real_type receiver_distance_plus_geometrized =
 			receiver_distance_geometrized + epsilon;
@@ -1185,7 +1097,7 @@ void run_simulation()
 				receiver_box, forward_box,
 				emitter_r_plus_geometrized,
 				emitter_rho_eq_geometrized,
-				i + 1, pos_res);
+				si, spin_steps);
 		}
 
 		// beta function
@@ -1210,7 +1122,7 @@ void run_simulation()
 			/ epsilon;
 
 		// g variable
-		real_type gradient_strength =
+		const real_type gradient_strength =
 			-gradient_integer
 			/
 			(2.0 * receiver_radius_geometrized
@@ -1218,118 +1130,44 @@ void run_simulation()
 				* receiver_radius_geometrized);
 
 		const real_type a_flat_geometrized =
-			gradient_strength * receiver_distance_geometrized * log(2)
+			gradient_strength * receiver_distance_geometrized * log(2.0)
 			/ (8.0 * emitter_mass_geometrized);
-
-
-
-
-
-		const real_type gradient_integer_forward =
-			collision_count_plus_minus_collision_count.second
-			/ epsilon;
-
-		// g variable
-		real_type gradient_strength_forward =
-			-gradient_integer_forward
-			/
-			(2.0 * receiver_radius_geometrized
-				* receiver_radius_geometrized
-				* receiver_radius_geometrized);
-
-		const real_type a_flat_geometrized_forward =
-			gradient_strength_forward * receiver_distance_geometrized * log(2)
-			/ (8.0 * emitter_mass_geometrized);
-
-
-
-
-
-
-		const real_type a_Newton_geometrized =
-			sqrt(
-				n_geometrized * log(2.0)
-				/
-				(4.0 * pi *
-					pow(receiver_distance_geometrized, 4.0))
-			);
-
-		const real_type dt_Schwarzschild = sqrt(1 - emitter_r_plus_geometrized / receiver_distance_geometrized);
-
-		const real_type a_Schwarzschild_geometrized =
-			emitter_r_plus_geometrized / (pi * pow(receiver_distance_geometrized, 2.0) * dt_Schwarzschild);
-
-
-
-		//const real_type sigma = receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized * cos(theta) * cos(theta);
-		//const real_type delta = receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized;
-		//const real_type A = (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) - emitter_a_geometrized * emitter_a_geometrized * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * sin(theta) * sin(theta);
-
-		//const real_type dt_Kerr = sqrt(sigma*delta/A);
-		//const real_type dt_Kerr = sqrt((receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized * cos(theta) * cos(theta)) * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) / ((receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * (receiver_distance_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) - emitter_a_geometrized * emitter_a_geometrized * (receiver_distance_geometrized * receiver_distance_geometrized - 2 * emitter_mass_geometrized * receiver_distance_geometrized + emitter_a_geometrized * emitter_a_geometrized) * sin(theta) * sin(theta)));
-
-
 
 		// receiver_distance_geometrized is a Cartesian distance (rho on the
-		// equator); deta_dr wants Boyer-Lindquist r. On the equator	
+		// equator); deta_dr wants Boyer-Lindquist r. On the equator
 		// rho^2 = r^2 + a^2, and the numerical gradient is taken along
 		// Cartesian x, so convert with d(eta)/d(rho) = (rho / r) d(eta)/dr.
 		const vector_3 receiver_center(receiver_distance_geometrized, 0.0, 0.0);
 		const real_type receiver_r_BL = bl_r(receiver_center, emitter_a_geometrized);
 		const real_type drBL_drho = receiver_distance_geometrized / receiver_r_BL;
 
-		cout << "drBL_drho " << drBL_drho << endl;
-
-		const real_type a_Kerr_geometrized =
-			lerp(2, 8, pow(spin, 5.0)) *
+		// Everything in a_Kerr except the spin-dependent prefactor
+		const real_type a_Kerr_base =
 			drBL_drho *
-			(1 / pi) * 
+			(1 / pi) *
 			deta_dr(receiver_r_BL, theta, emitter_mass_geometrized, emitter_a_geometrized);
 
+		// The prefactor the simulation		actually needs
+		const real_type k_needed = a_flat_geometrized / a_Kerr_base;
 
+		// The candidate: lerp(2, 8, t), t = ((2M / r_+)^2 - 1) / 3
+		//const real_type t_guess = kerr_lerp_t(emitter_mass_geometrized, emitter_r_plus_geometrized);
+		const real_type k_guess = kerr_prefactor(emitter_mass_geometrized, emitter_r_plus_geometrized);
 
+		const real_type a_Kerr_geometrized = k_guess * a_Kerr_base;
 
-		const real_type a_flat_expected_box_geometrized =
-			expected_a_flat_box(receiver_distance_geometrized, epsilon, receiver_radius_geometrized, emitter_r_plus_geometrized, emitter_a_geometrized);
-
-		//cout << a_flat_geometrized / a_flat_expected_box_geometrized << endl;
-
-
-
-		//cout << a_flat_expected_geometrized / a_flat_expected_box_geometrized << endl;
-
-
-		//cout << a_flat_expected_geometrized / a_flat_geometrized << endl;
-
-
-		cout << "a_Kerr_geometrized " << a_Kerr_geometrized << endl;
-
-		//		cout << "a_Schwarzschild_geometrized " << a_Schwarzschild_geometrized << endl;
-		cout << "a_Newton_geometrized " << a_Newton_geometrized << endl;
+		cout << "drBL_drho          " << drBL_drho << endl;
 		cout << "a_flat_geometrized " << a_flat_geometrized << endl;
-		cout << "a_flat_geometrized_forward " << a_flat_geometrized_forward << endl;
-		cout << "a_flat_expected_box_geometrized " << a_flat_expected_box_geometrized << endl;
+		cout << "a_Kerr_geometrized " << a_Kerr_geometrized << endl;
+		//cout << "t_guess            " << t_guess << endl;
+		cout << "k_needed           " << k_needed << endl;
+		cout << "k_guess            " << k_guess << endl;
+		cout << "k_needed / k_guess " << k_needed / k_guess << endl;
 
-		cout << a_Kerr_geometrized / a_flat_geometrized << endl;
-		cout << a_Kerr_geometrized / a_flat_expected_box_geometrized << endl;
-
-		cout << endl;
-
-		////cout << a_Schwarzschild_geometrized / a_flat_geometrized_forward << endl;
-		////cout << endl;
-
-		//cout << a_Newton_geometrized / a_flat_geometrized << endl;
-		//cout << endl << endl;
-
-
+//		outfile_k << spin << " " << k_needed << " " << k_guess << " " << k_needed / k_guess << endl;
 		outfile_numerical << receiver_distance_geometrized << " " << a_flat_geometrized << endl;
-		outfile_analytical << receiver_distance_geometrized << " " << a_Schwarzschild_geometrized << endl;
-		outfile_Newton << receiver_distance_geometrized << " " << a_Newton_geometrized << endl;
-
-
+		outfile_analytical << receiver_distance_geometrized << " " << a_Kerr_geometrized << endl;
 	}
-
-
 
 	publish_simulation_finished();
 }
@@ -1353,7 +1191,7 @@ void run_simulation()
 //   Esc          quit (also stops the simulation)
 //
 // Everything is drawn relative to the midpoint of the two boxes, computed in
-// real_type (long real_type) before converting to float, so the boxes stay
+// real_type (long double) before converting to float, so the boxes stay
 // precise even when they are far from the origin.
 // ===========================================================================
 
@@ -1445,8 +1283,10 @@ GLint viz_mvp_location = -1;
 GLint viz_color_location = -1;
 
 GLuint viz_dynamic_vao = 0, viz_dynamic_vbo = 0; // re-uploaded every frame (boxes, axes)
-GLuint viz_sphere_vao = 0, viz_sphere_vbo = 0;   // built once (emitter wireframe)
+GLuint viz_sphere_vao = 0, viz_sphere_vbo = 0;   // rebuilt when the horizon changes (emitter wireframe)
 GLsizei viz_sphere_vertex_count = 0;
+real_type viz_sphere_built_r_plus = -1;          // horizon the wireframe was last built for
+real_type viz_sphere_built_rho_eq = -1;
 
 // Field line cylinders: separate lit program, interleaved position + normal
 GLuint viz_lit_program = 0;
@@ -1556,7 +1396,7 @@ void main()
 }
 )";
 
-// Instanced unit sphere: the mesh vertex real_types as its own normal
+// Instanced unit sphere: the mesh vertex doubles as its own normal
 const char* viz_marker_vertex_shader_source = R"(
 #version 400 core
 layout(location = 0) in vec3 position;
@@ -1683,7 +1523,7 @@ bool viz_init_gl()
 	glEnableVertexAttribArray(0);
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
 
-	// Static sphere buffer (filled once the emitter radius is known)
+	// Sphere buffer (filled once the emitter radius is known, refilled when it changes)
 	glGenVertexArrays(1, &viz_sphere_vao);
 	glGenBuffers(1, &viz_sphere_vbo);
 	glBindVertexArray(viz_sphere_vao);
@@ -1766,6 +1606,9 @@ void viz_build_emitter_sphere(const real_type r_plus, const real_type rho_eq)
 	glBindBuffer(GL_ARRAY_BUFFER, viz_sphere_vbo);
 	glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_STATIC_DRAW);
 	viz_sphere_vertex_count = static_cast<GLsizei>(v.size() / 3);
+
+	viz_sphere_built_r_plus = r_plus;
+	viz_sphere_built_rho_eq = rho_eq;
 }
 
 // Corner i uses sign bit 0 for axis[0], bit 1 for axis[1], bit 2 for axis[2].
@@ -1948,9 +1791,9 @@ void viz_update_title(const render_snapshot& snap)
 	char buffer[256];
 
 	snprintf(buffer, sizeof(buffer),
-		"Receiver (cyan) / forward (orange) boxes  |  step %zu of %zu  |  r = %.6g  |  field lines %zu%s",
+		"Receiver (cyan) / forward (orange) boxes  |  spin step %zu of %zu  |  r = %.6g  |  field lines %zu%s",
 		snap.step, snap.step_count,
-		static_cast<real_type>(snap.receiver_box.r),
+		static_cast<double>(snap.receiver_box.r),
 		recorded_field_line_count.load(std::memory_order_relaxed),
 		snap.finished ? "  |  simulation finished" : "");
 
@@ -1987,7 +1830,10 @@ void viz_display()
 		viz_camera_initialized = true;
 	}
 
-	if (viz_sphere_vertex_count == 0)
+	// The horizon changes shape with spin, so rebuild the wireframe when it does
+	if (viz_sphere_vertex_count == 0 ||
+		viz_sphere_built_r_plus != snap.emitter_radius ||
+		viz_sphere_built_rho_eq != snap.emitter_rho_eq)
 		viz_build_emitter_sphere(snap.emitter_radius, snap.emitter_rho_eq);
 
 	viz_update_title(snap);
@@ -1996,7 +1842,7 @@ void viz_display()
 	vector_3 target = snap.receiver_box.center + snap.forward_box.center;
 	target = target * static_cast<real_type>(0.5);
 
-	// Orbit camera, +z up (the forward box is offset along world +z)
+	// Orbit camera, +z up
 	const float cp = cosf(viz_camera_pitch);
 	const vec3f eye =
 	{
@@ -2198,6 +2044,9 @@ void viz_mouse_wheel(int, int direction, int, int)
 
 int main(int argc, char** argv)
 {
+	// Valid parameters before anything (renderer or simulation) reads them
+	set_spin_parameters(spin);
+
 	glutInit(&argc, argv);
 	glutInitContextVersion(4, 0);
 	glutInitContextProfile(GLUT_CORE_PROFILE);
