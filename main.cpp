@@ -27,7 +27,7 @@ constexpr T lerp(T a, T b, T t) {
 
 real_type spin = 0.0; // a_*, changed by the spin sweep in run_simulation
 const real_type theta = pi / 2.0;
-const real_type n_geometrized = 1e8; // field line count
+const real_type n_geometrized = 1e9; // field line count
 
 // true: Owen-scrambled Sobol sampling of the chord ends (low noise)
 // false: the original mt19937 sampling
@@ -1174,7 +1174,7 @@ void run_simulation()
 	// Extra points near extremality, where k changes fastest.
 	// a* = 1 is extremal (r_+ = M), so stay just below it.
 	const vector<real_type> spin_list =
-	{ /*0.001, 0.1, 0.2, 0.3, 0.4, 0.5, */ 0.6, 0.7, 0.8, 0.9, 0.999 };
+	{ 0.001, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.999 };
 
 	// Receiver centre at rho_eq + offset * h. offset = 1 is the old placement
 	// (inner face touching the horizon). If k_needed changes with offset at a
