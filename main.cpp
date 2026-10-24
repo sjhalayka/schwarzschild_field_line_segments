@@ -27,7 +27,11 @@ constexpr T lerp(T a, T b, T t) {
 
 real_type spin = 0.0; // a_*, changed by the spin sweep in run_simulation
 const real_type theta = pi / 2.0;
-const real_type n_geometrized = 1e10; // field line count
+const real_type n_geometrized = 1e8; // field line count
+
+// true: Owen-scrambled Sobol sampling of the chord ends (low noise)
+// false: the original mt19937 sampling
+const bool use_qmc = true;
 
 
 
@@ -781,12 +785,27 @@ inline uint32_t owen_scramble_32(uint32_t x, const uint32_t seed)
 
 const uint32_t sobol_scramble_seed = 0x9e3779b9u;
 
+// Run-level seed, changed per run so that repeated runs give independent
+// randomised-QMC estimates (their spread is the error bar).
+uint32_t qmc_run_seed = 0;
+
+// The 32-bit Sobol index only covers 2^32 (about 4.3e9) points. Longer runs
+// (n = 1e10) are split into blocks of 2^32 points, each block an
+// independently Owen-scrambled Sobol set, so no point is ever repeated.
 void qmc_sample_4d(const long long unsigned int i, real_type u[4])
 {
+	const uint32_t index = static_cast<uint32_t>(i & 0xFFFFFFFFull);
+	const uint32_t block = static_cast<uint32_t>(i >> 32);
+
 	for (int d = 0; d < 4; d++)
 	{
-		const uint32_t seed = hash_32(sobol_scramble_seed + 0x632be5abu * static_cast<uint32_t>(d + 1));
-		const uint32_t bits = owen_scramble_32(sobol_32(static_cast<uint32_t>(i), d), seed);
+		const uint32_t seed = hash_32(
+			sobol_scramble_seed
+			+ 0x632be5abu * static_cast<uint32_t>(d + 1)
+			+ 0x85ebca6bu * (block + 1)
+			+ 0xc2b2ae35u * qmc_run_seed);
+
+		const uint32_t bits = owen_scramble_32(sobol_32(index, d), seed);
 		u[d] = (static_cast<real_type>(bits) + 0.5) / 4294967296.0;
 	}
 }
@@ -857,8 +876,21 @@ void worker_thread(
 	{
 		// C) Schwarzschild / Kerr gravitation, quantum:
 		// both chord ends are uniform points on the current horizon spheroid
-		const vector_3 location = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
-		const vector_3 r = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
+		vector_3 location, r;
+
+		if (use_qmc)
+		{
+			// Owen-scrambled Sobol: much lower noise than mt19937 at the same n
+			real_type u[4];
+			qmc_sample_4d(i, u);
+			location = unit_sphere_to_horizon(unit_square_to_sphere(u[0], u[1]));
+			r = unit_sphere_to_horizon(unit_square_to_sphere(u[2], u[3]));
+		}
+		else
+		{
+			location = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
+			r = unit_sphere_to_horizon(random_unit_vector(local_gen, local_dis));
+		}
 
 		vector_3 normal = (location - r).normalize();
 
@@ -1035,138 +1067,283 @@ real_type deta_dr(real_type r, real_type theta, real_type M, real_type a)
 
 
 
+// ---------------------------------------------------------------------------
+// Box-averaged analytical gradient
+//
+// deta_dr above is evaluated at the receiver centre only, while the
+// simulation counts chord length over the whole receiver cube and takes a
+// forward difference between the cube at x and the cube shifted by epsilon.
+// Near the horizon eta' changes a lot across one cube (it diverges like
+// 1 / sqrt(r - r_+) for a* < 1), so the point value and the cube value differ
+// by a spin-dependent amount, which then leaks into k_needed.
+//
+// eta_box_gradient does the analytical side exactly the way the simulation
+// does the numerical side: average eta over the cube with 8^3 Gauss-Legendre
+// points, shift by epsilon along +x, forward difference. Because eta is
+// evaluated at Cartesian (Kerr-Schild) points, the d r_BL / d rho conversion
+// is built in and no drBL_drho factor is needed.
+// ---------------------------------------------------------------------------
+
+// ZAMO lapse eta = sqrt(Sigma Delta / A) at a Kerr-Schild Cartesian point
+real_type eta_at(const vector_3& p, const real_type M, const real_type a)
+{
+	const real_type r = bl_r(p, a);
+
+	if (r <= 0)
+		return 0;
+
+	real_type c = p.z / r;
+	if (c > 1.0) c = 1.0;
+	if (c < -1.0) c = -1.0;
+
+	const real_type c2 = c * c, s2 = 1.0 - c2;
+	const real_type a2 = a * a;
+	const real_type r2a2 = r * r + a2;
+	const real_type Sigma = r * r + a2 * c2;
+	const real_type Delta = r * r - 2.0 * M * r + a2;
+
+	if (Delta <= 0)
+		return 0; // on or inside the horizon
+
+	const real_type A = r2a2 * r2a2 - a2 * Delta * s2;
+
+	return sqrt(Sigma * Delta / A);
+}
+
+// Average of eta over the axis-aligned cube centred at (cx, 0, 0), half-side h.
+// (The receiver box axes are +x, -z, +y, so the cube is axis aligned.)
+real_type eta_box_average(const real_type cx, const real_type h, const real_type M, const real_type a)
+{
+	real_type sum = 0;
+
+	for (int i = 0; i < 8; i++)
+		for (int j = 0; j < 8; j++)
+			for (int k = 0; k < 8; k++)
+			{
+				const vector_3 p(cx + h * gl8_node[i], h * gl8_node[j], h * gl8_node[k]);
+				sum += gl8_weight[i] * gl8_weight[j] * gl8_weight[k] * eta_at(p, M, a);
+			}
+
+	return sum / 8; // weights sum to 2 per axis
+}
+
+// Forward difference of the cube average, same epsilon as the simulation
+real_type eta_box_gradient(const real_type cx, const real_type eps, const real_type h, const real_type M, const real_type a)
+{
+	return (eta_box_average(cx + eps, h, M, a) - eta_box_average(cx, h, M, a)) / eps;
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Empirical prefactor fitted to the a* = 0.1 .. 0.9 run (point-evaluated
+// analytical side):
+//
+//     k(a*) = 2 + c1 * u,   u = r_- / r_+ = 2M / r_+ - 1
+//
+// u runs from 0 (a* = 0) to 1 (a* = 1), so k runs from 2 to 2 + c1.
+// c1 = 2.64 was fitted against k_needed_point. Refit c1 against
+// k_needed_box once the box-averaged numbers are in (column 7 of
+// Kerr_prefactor), and add a u^2 term if the near-extremal points bend up.
+// ---------------------------------------------------------------------------
+const real_type kerr_fit_c1 = 1.0;
+
+real_type kerr_prefactor_fit(const real_type M, const real_type r_plus)
+{
+	const real_type u = 2.0 * M / r_plus - 1.0;
+	return 2.0 + kerr_fit_c1 * u;
+}
+
+
+
 void run_simulation()
 {
-	// spin, k_needed (from the simulation), k_guess (candidate formula), ratio
+	// One row per run, columns:
+	//  1 spin  2 offset (receiver centre at rho_eq + offset * h)  3 repeat
+	//  4 receiver distance  5 r_BL of the receiver centre  6 k_needed_point
+	//  7 k_needed_box  8 k_guess (8 / (1 + sqrt(1 - a*^2))^2)  9 k_fit
+	//  10 a_flat
 	ofstream outfile_k("Kerr_prefactor");
-	// receiver distance, a	_flat (simulation), a_Kerr (candidate formula)
-	ofstream outfile_numerical("Kerr_numerical");
-	ofstream outfile_analytical("Kerr_analytical");
+	outfile_k << "# spin offset repeat distance r_BL k_needed_point k_needed_box k_guess k_fit a_flat" << endl;
 
-	const size_t spin_steps = 10;
+	// Columns: receiver distance, value, spin, offset, repeat
+	// (the first two columns are the same as before)
+	ofstream outfile_numerical("Kerr_numerical");    // a_flat from the simulation
+	ofstream outfile_analytical("Kerr_analytical");  // k_fit * point-evaluated base
 
-	// Integer counter, so spin does not drift from repeated += 0.1
-	for (size_t si = 1; si <= spin_steps; si++)
+	// Extra points near extremality, where k changes fastest.
+	// a* = 1 is extremal (r_+ = M), so stay just below it.
+	const vector<real_type> spin_list =
+	{ /*0.001, 0.1, 0.2, 0.3, 0.4, 0.5, */ 0.6, 0.7, 0.8, 0.9, 0.999 };
+
+	// Receiver centre at rho_eq + offset * h. offset = 1 is the old placement
+	// (inner face touching the horizon). If k_needed changes with offset at a
+	// fixed spin, k is not a function of spin alone.
+	const vector<real_type> offset_list = { 1.0/*, 4.0, 16.0*/ };
+
+	// Independent randomised-QMC repeats per configuration; with 2 or more,
+	// the spread between repeats is the Monte Carlo error bar.
+	const size_t repeats = 1;
+
+	const size_t run_count = spin_list.size() * offset_list.size() * repeats;
+	size_t run_index = 0;
+
+	for (size_t si = 0; si < spin_list.size(); si++)
 	{
-		if (abort_requested.load(std::memory_order_relaxed))
-			break;
-
-		real_type this_spin = static_cast<real_type>(si) / static_cast<real_type>(spin_steps);
-
-		// a* = 1 is extremal (r_+ = M); stay just below it
-		if (this_spin > 0.999)
-			this_spin = 0.999;
-
-		// Recompute M, a, r_+, rho_eq for this spin (before any worker starts)
-		set_spin_parameters(this_spin);
-
-		cout << "\n=== spin " << spin << " (" << si << " of " << spin_steps << ") ===" << endl;
-		cout << "M " << emitter_mass_geometrized
-			<< "  a " << emitter_a_geometrized
-			<< "  r_+ " << emitter_r_plus_geometrized
-			<< "  rho_eq " << emitter_rho_eq_geometrized << endl;
-
-		const real_type receiver_radius_geometrized =
-			emitter_r_plus_geometrized * 0.01; // Minimum one Planck unit
-
-		const real_type epsilon =
-			receiver_radius_geometrized;
-
-		// The receiver sits on the equator (+x axis), so it must start just
-		// outside the spheroid's equatorial radius, not outside r_+.
-		const real_type receiver_distance_geometrized =
-			emitter_rho_eq_geometrized
-			+ receiver_radius_geometrized;
-
-		const real_type receiver_distance_plus_geometrized =
-			receiver_distance_geometrized + epsilon;
-
-		segment_length = epsilon / 10.0;
-
-		// Hand the boxes for this step to the renderer
+		for (size_t oi = 0; oi < offset_list.size(); oi++)
 		{
-			OBB receiver_box, right_box, forward_box;
+			for (size_t rep = 0; rep < repeats; rep++)
+			{
+				if (abort_requested.load(std::memory_order_relaxed))
+					break;
 
-			make_receiver_boxes(
-				receiver_distance_geometrized,
-				receiver_radius_geometrized,
-				epsilon,
-				receiver_box, right_box, forward_box);
+				run_index++;
 
-			publish_render_state(
-				receiver_box, forward_box,
-				emitter_r_plus_geometrized,
-				emitter_rho_eq_geometrized,
-				si, spin_steps);
+				// Recompute M, a, r_+, rho_eq for this spin (before any worker starts)
+				set_spin_parameters(spin_list[si]);
+
+				// New scramble per repeat (also read-only while the workers run)
+				qmc_run_seed = static_cast<uint32_t>(rep);
+
+				const real_type offset = offset_list[oi];
+
+				cout << "\n=== spin " << spin << "  offset " << offset << "  repeat " << rep
+					<< "  (run " << run_index << " of " << run_count << ") ===" << endl;
+				cout << "M " << emitter_mass_geometrized
+					<< "  a " << emitter_a_geometrized
+					<< "  r_+ " << emitter_r_plus_geometrized
+					<< "  rho_eq " << emitter_rho_eq_geometrized << endl;
+
+				const real_type receiver_radius_geometrized =
+					emitter_r_plus_geometrized * 0.01; // Minimum one Planck unit
+
+				const real_type epsilon =
+					receiver_radius_geometrized;
+
+				// The receiver sits on the equator (+x axis), so it must start
+				// outside the spheroid's equatorial radius, not outside r_+.
+				const real_type receiver_distance_geometrized =
+					emitter_rho_eq_geometrized
+					+ offset * receiver_radius_geometrized;
+
+				const real_type receiver_distance_plus_geometrized =
+					receiver_distance_geometrized + epsilon;
+
+				segment_length = epsilon / 10.0;
+
+				// Hand the boxes for this run to the renderer
+				{
+					OBB receiver_box, right_box, forward_box;
+
+					make_receiver_boxes(
+						receiver_distance_geometrized,
+						receiver_radius_geometrized,
+						epsilon,
+						receiver_box, right_box, forward_box);
+
+					publish_render_state(
+						receiver_box, forward_box,
+						emitter_r_plus_geometrized,
+						emitter_rho_eq_geometrized,
+						run_index, run_count);
+				}
+
+				// beta function
+				const pair<real_type, real_type> collision_count_plus_minus_collision_count =
+					get_intersecting_line_density(
+						static_cast<long long unsigned int>(n_geometrized),
+						emitter_r_plus_geometrized,
+						receiver_distance_geometrized,
+						receiver_distance_plus_geometrized,
+						receiver_radius_geometrized,
+						epsilon);
+
+				if (abort_requested.load(std::memory_order_relaxed))
+				{
+					cout << "Simulation aborted." << endl;
+					break;
+				}
+
+				// alpha variable
+				const real_type gradient_integer =
+					collision_count_plus_minus_collision_count.first
+					/ epsilon;
+
+				// g variable
+				const real_type gradient_strength =
+					-gradient_integer
+					/
+					(2.0 * receiver_radius_geometrized
+						* receiver_radius_geometrized
+						* receiver_radius_geometrized);
+
+				const real_type a_flat_geometrized =
+					gradient_strength * receiver_distance_geometrized * log(2.0)
+					/ (8.0 * emitter_mass_geometrized);
+
+				// --- Point-evaluated analytical base (as before) ---
+				// receiver_distance_geometrized is a Cartesian distance (rho on
+				// the equator); deta_dr wants Boyer-Lindquist r. On the equator
+				// rho^2 = r^2 + a^2, so d(eta)/d(rho) = (rho / r) d(eta)/dr.
+				const vector_3 receiver_center(receiver_distance_geometrized, 0.0, 0.0);
+				const real_type receiver_r_BL = bl_r(receiver_center, emitter_a_geometrized);
+				const real_type drBL_drho = receiver_distance_geometrized / receiver_r_BL;
+
+				const real_type a_Kerr_base_point =
+					drBL_drho *
+					(1 / pi) *
+					deta_dr(receiver_r_BL, theta, emitter_mass_geometrized, emitter_a_geometrized);
+
+				// --- Box-averaged analytical base (same stencil as the simulation) ---
+				const real_type a_Kerr_base_box =
+					(1 / pi) *
+					eta_box_gradient(
+						receiver_distance_geometrized,
+						epsilon,
+						receiver_radius_geometrized,
+						emitter_mass_geometrized,
+						emitter_a_geometrized);
+
+				// The prefactor the simulation actually needs, both ways
+				const real_type k_needed_point = a_flat_geometrized / a_Kerr_base_point;
+				const real_type k_needed_box = a_flat_geometrized / a_Kerr_base_box;
+
+				// Candidates
+				const real_type k_guess = kerr_prefactor(emitter_mass_geometrized, emitter_r_plus_geometrized);
+				const real_type k_fit = kerr_prefactor_fit(emitter_mass_geometrized, emitter_r_plus_geometrized);
+
+				// k_fit was fitted against the point base, so pair it with that base
+				const real_type a_Kerr_geometrized = k_guess * a_Kerr_base_box;// a_Kerr_base_point;
+
+				cout << "r_BL - r_+         " << receiver_r_BL - emitter_r_plus_geometrized << endl;
+				cout << "drBL_drho          " << drBL_drho << endl;
+				cout << "a_flat_geometrized " << a_flat_geometrized << endl;
+				cout << "a_Kerr_geometrized " << a_Kerr_geometrized << "  (k_fit, point base)" << endl;
+				cout << "base point / box   " << a_Kerr_base_point / a_Kerr_base_box << endl;
+				cout << "k_needed_point     " << k_needed_point << endl;
+				cout << "k_needed_box       " << k_needed_box << endl;
+				cout << "k_guess            " << k_guess << "  (ratio box/guess " << k_needed_box / k_guess << ")" << endl;
+				cout << "k_fit              " << k_fit << "  (ratio box/fit " << k_needed_box / k_fit << ")" << endl;
+				cout << "a_flat_geometrized / a_Kerr_geometrized " << a_flat_geometrized / a_Kerr_geometrized << endl;
+
+				outfile_k << spin << " " << offset << " " << rep << " "
+					<< receiver_distance_geometrized << " " << receiver_r_BL << " "
+					<< k_needed_point << " " << k_needed_box << " "
+					<< k_guess << " " << k_fit << " " << a_flat_geometrized << endl;
+
+				outfile_numerical << receiver_distance_geometrized << " " << a_flat_geometrized
+					<< " " << spin << " " << offset << " " << rep << endl;
+
+				outfile_analytical << receiver_distance_geometrized << " " << a_Kerr_geometrized
+					<< " " << spin << " " << offset << " " << rep << endl;
+			}
+
+			if (abort_requested.load(std::memory_order_relaxed))
+				break;
 		}
 
-		// beta function
-		const pair<real_type, real_type> collision_count_plus_minus_collision_count =
-			get_intersecting_line_density(
-				static_cast<long long unsigned int>(n_geometrized),
-				emitter_r_plus_geometrized,
-				receiver_distance_geometrized,
-				receiver_distance_plus_geometrized,
-				receiver_radius_geometrized,
-				epsilon);
-
 		if (abort_requested.load(std::memory_order_relaxed))
-		{
-			cout << "Simulation aborted." << endl;
 			break;
-		}
-
-		// alpha variable
-		const real_type gradient_integer =
-			collision_count_plus_minus_collision_count.first
-			/ epsilon;
-
-		// g variable
-		const real_type gradient_strength =
-			-gradient_integer
-			/
-			(2.0 * receiver_radius_geometrized
-				* receiver_radius_geometrized
-				* receiver_radius_geometrized);
-
-		const real_type a_flat_geometrized =
-			gradient_strength * receiver_distance_geometrized * log(2.0)
-			/ (8.0 * emitter_mass_geometrized);
-
-		// receiver_distance_geometrized is a Cartesian distance (rho on the
-		// equator); deta_dr wants Boyer-Lindquist r. On the equator
-		// rho^2 = r^2 + a^2, and the numerical gradient is taken along
-		// Cartesian x, so convert with d(eta)/d(rho) = (rho / r) d(eta)/dr.
-		const vector_3 receiver_center(receiver_distance_geometrized, 0.0, 0.0);
-		const real_type receiver_r_BL = bl_r(receiver_center, emitter_a_geometrized);
-		const real_type drBL_drho = receiver_distance_geometrized / receiver_r_BL;
-
-		// Everything in a_Kerr except the spin-dependent prefactor
-		const real_type a_Kerr_base =
-			drBL_drho *
-			(1 / pi) *
-			deta_dr(receiver_r_BL, theta, emitter_mass_geometrized, emitter_a_geometrized);
-
-		// The prefactor the simulation		actually needs
-		const real_type k_needed = a_flat_geometrized / a_Kerr_base;
-
-		// The candidate: lerp(2, 8, t), t = ((2M / r_+)^2 - 1) / 3
-		//const real_type t_guess = kerr_lerp_t(emitter_mass_geometrized, emitter_r_plus_geometrized);
-		const real_type k_guess = kerr_prefactor(emitter_mass_geometrized, emitter_r_plus_geometrized);
-
-		const real_type a_Kerr_geometrized = k_guess * a_Kerr_base;
-
-		cout << "drBL_drho          " << drBL_drho << endl;
-		cout << "a_flat_geometrized " << a_flat_geometrized << endl;
-		cout << "a_Kerr_geometrized " << a_Kerr_geometrized << endl;
-		//cout << "t_guess            " << t_guess << endl;
-		cout << "k_needed           " << k_needed << endl;
-		cout << "k_guess            " << k_guess << endl;
-		cout << "k_needed / k_guess " << k_needed / k_guess << endl;
-
-//		outfile_k << spin << " " << k_needed << " " << k_guess << " " << k_needed / k_guess << endl;
-		outfile_numerical << receiver_distance_geometrized << " " << a_flat_geometrized << endl;
-		outfile_analytical << receiver_distance_geometrized << " " << a_Kerr_geometrized << endl;
 	}
 
 	publish_simulation_finished();
