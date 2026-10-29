@@ -27,6 +27,7 @@ constexpr T lerp(T a, T b, T t) {
 
 real_type spin = 0.0; // a_*, changed by the spin sweep in run_simulation
 const real_type theta = pi / 2.0;
+const real_type phi = 0;
 const real_type n_geometrized = 1e9; // field line count
 
 // true: Owen-scrambled Sobol sampling of the chord ends (low noise)
@@ -439,8 +440,8 @@ void make_receiver_boxes(
 	// Its radial orientation there is axis[0] = +x, axis[1] = -z, axis[2] = +y.
 	receiver_box = make_radial_OBB(
 		receiver_distance,
-		0.5 * pi,
-		0.0,
+		theta,
+		phi,
 		vector_3(receiver_radius, receiver_radius, receiver_radius));
 
 	// Same orientation, shifted by epsilon along world +x
@@ -449,7 +450,7 @@ void make_receiver_boxes(
 	forward_box = make_radial_OBB(
 		receiver_distance,
 		theta,
-		epsilon / receiver_distance,
+		phi + epsilon / receiver_distance,
 		vector_3(receiver_radius, receiver_radius, receiver_radius));
 }
 
@@ -1174,12 +1175,12 @@ void run_simulation()
 	// Extra points near extremality, where k changes fastest.
 	// a* = 1 is extremal (r_+ = M), so stay just below it.
 	const vector<real_type> spin_list =
-	{ 0.001, /*0.1, 0.2, 0.3, 0.4, */0.5, /* 0.6, 0.7, 0.8, 0.9,*/ 0.999};
+	{ /*0.001, 0.1, 0.2, 0.3, 0.4, */ 0.5, /* 0.6, 0.7, 0.8, 0.9, 0.999 */};
 
 	// Receiver centre at rho_eq + offset * h. offset = 1 is the old placement
 	// (inner face touching the horizon). If k_needed changes with offset at a
 	// fixed spin, k is not a function of spin alone.
-	const vector<real_type> offset_list = { 1.0/*, 4.0, 16.0*/ };
+	const vector<real_type> offset_list = { 1.0, 3.0, 5.0 };
 
 	// Independent randomised-QMC repeats per configuration; with 2 or more,
 	// the spread between repeats is the Monte Carlo error bar.
