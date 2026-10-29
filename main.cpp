@@ -28,11 +28,11 @@ constexpr T lerp(T a, T b, T t) {
 real_type spin = 0.0; // a_*, changed by the spin sweep in run_simulation
 const real_type theta = pi / 4.0;
 const real_type phi = 0;
-const real_type n_geometrized = 1e8; // field line count
+const real_type n_geometrized = 1e9; // field line count
 
 // true: Owen-scrambled Sobol sampling of the chord ends (low noise)
 // false: the original mt19937 sampling
-const bool use_qmc = false;
+const bool use_qmc = true;
 
 
 
@@ -436,15 +436,12 @@ void make_receiver_boxes(
 	OBB& right_box,
 	OBB& forward_box)
 {
-	// Receiver sits on the +x axis: r = receiver_distance, theta = pi/2, phi = 0.
-	// Its radial orientation there is axis[0] = +x, axis[1] = -z, axis[2] = +y.
 	receiver_box = make_radial_OBB(
 		receiver_distance,
 		theta,
 		phi,
 		vector_3(receiver_radius, receiver_radius, receiver_radius));
 
-	// Same orientation, shifted by epsilon along world +x
 	//right_box = translate_OBB(receiver_box, vector_3(epsilon, 0.0, 0.0));
 	right_box = make_radial_OBB(
 		receiver_distance + epsilon,
@@ -452,12 +449,10 @@ void make_receiver_boxes(
 		phi,
 		vector_3(receiver_radius, receiver_radius, receiver_radius));
 
-
-
 	forward_box = make_radial_OBB(
 		receiver_distance,
 		theta,
-		phi + sqrt(2.0) * epsilon / receiver_distance,
+		phi + epsilon / receiver_distance,
 		vector_3(receiver_radius, receiver_radius, receiver_radius));
 }
 
@@ -1147,6 +1142,72 @@ real_type eta_box_gradient(const real_type cx, const real_type eps, const real_t
 
 
 // ---------------------------------------------------------------------------
+// Off-equator analytical side
+//
+// eta_box_average / eta_box_gradient and the deta_dr * drBL_drho point base
+// above all assume the receiver sits on the +x axis (theta = pi/2). For any
+// other theta the receiver box is centred at (d sin(theta), 0, d cos(theta))
+// and is rotated, and a radial step in Cartesian space changes both
+// Boyer-Lindquist r and Boyer-Lindquist theta. deta_dr only has the d/dr part,
+// and the drBL_drho = rho / r conversion is only valid on the equator.
+//
+// The functions below avoid all of that by evaluating eta at Kerr-Schild
+// Cartesian points (eta_at does the BL conversion internally) on the actual
+// boxes that the simulation uses.
+// ---------------------------------------------------------------------------
+
+// Directional derivative of eta along the unit vector n at Cartesian point p
+// (central difference; step should be much smaller than the box)
+real_type eta_directional_derivative(
+	const vector_3& p, const vector_3& n,
+	const real_type step, const real_type M, const real_type a)
+{
+	vector_3 dn = n;
+	dn *= step;
+
+	vector_3 pp = p;
+	pp += dn;
+
+	const vector_3 pm = p - dn;
+
+	return (eta_at(pp, M, a) - eta_at(pm, M, a)) / (2.0 * step);
+}
+
+// Average of eta over an OBB of any orientation, 8^3 Gauss-Legendre points
+// along the box's own axes
+real_type eta_OBB_average(const OBB& box, const real_type M, const real_type a)
+{
+	real_type sum = 0;
+
+	for (int i = 0; i < 8; i++)
+		for (int j = 0; j < 8; j++)
+			for (int k = 0; k < 8; k++)
+			{
+				vector_3 a0 = box.axis[0], a1 = box.axis[1], a2 = box.axis[2];
+
+				vector_3 p = box.center;
+				p += a0 * (box.half_extents.x * gl8_node[i]);
+				p += a1 * (box.half_extents.y * gl8_node[j]);
+				p += a2 * (box.half_extents.z * gl8_node[k]);
+
+				sum += gl8_weight[i] * gl8_weight[j] * gl8_weight[k] * eta_at(p, M, a);
+			}
+
+	return sum / 8; // weights sum to 2 per axis
+}
+
+// Distance from the centre to the horizon spheroid along the polar angle t
+// (Kerr-Schild Cartesian, equatorial radius rho_eq, polar radius r_plus).
+// Equals rho_eq at t = pi/2 and r_plus at t = 0.
+real_type horizon_radius_along(const real_type t, const real_type r_plus, const real_type rho_eq)
+{
+	const real_type s = sin(t), c = cos(t);
+	return 1.0 / sqrt(s * s / (rho_eq * rho_eq) + c * c / (r_plus * r_plus));
+}
+
+
+
+// ---------------------------------------------------------------------------
 // Empirical prefactor fitted to the a* = 0.1 .. 0.9 run (point-evaluated
 // analytical side):
 //
@@ -1185,7 +1246,7 @@ void run_simulation()
 	// Extra points near extremality, where k changes fastest.
 	// a* = 1 is extremal (r_+ = M), so stay just below it.
 	const vector<real_type> spin_list =
-	{ /*0.001, 0.1, 0.2, 0.3, 0.4, */ 0.5, /* 0.6, 0.7, 0.8, 0.9, 0.999 */ };
+	{  0.001, /*0.1, 0.2, 0.3, 0.4, */ 0.5, /*0.6, 0.7, 0.8, 0.9, */ 0.999};
 
 	// Receiver centre at rho_eq + offset * h. offset = 1 is the old placement
 	// (inner face touching the horizon). If k_needed changes with offset at a
@@ -1231,10 +1292,20 @@ void run_simulation()
 				const real_type epsilon =
 					receiver_radius_geometrized;
 
-				// The receiver sits on the equator (+x axis), so it must start
-				// outside the spheroid's equatorial radius, not outside r_+.
+				// The receiver must start outside the horizon spheroid along its
+				// own direction. On the equator that radius is rho_eq; at other
+				// theta it is smaller (r_+ at the pole). With
+				// place_on_spheroid_surface = false the old placement
+				// (rho_eq + offset * h at every theta) is kept, which puts an
+				// off-equator box farther from the horizon than an equatorial one.
+				const bool place_on_spheroid_surface = false;
+
+				const real_type horizon_radius_here = place_on_spheroid_surface
+					? horizon_radius_along(theta, emitter_r_plus_geometrized, emitter_rho_eq_geometrized)
+					: emitter_rho_eq_geometrized;
+
 				const real_type receiver_distance_geometrized =
-					emitter_rho_eq_geometrized
+					horizon_radius_here
 					+ offset * receiver_radius_geometrized;
 
 				const real_type receiver_distance_plus_geometrized =
@@ -1242,22 +1313,22 @@ void run_simulation()
 
 				segment_length = epsilon / 10.0;
 
+				// The same boxes the worker threads build. Kept in scope so the
+				// analytical side below is evaluated on exactly these boxes.
+				OBB receiver_box, right_box, forward_box;
+
+				make_receiver_boxes(
+					receiver_distance_geometrized,
+					receiver_radius_geometrized,
+					epsilon,
+					receiver_box, right_box, forward_box);
+
 				// Hand the boxes for this run to the renderer
-				{
-					OBB receiver_box, right_box, forward_box;
-
-					make_receiver_boxes(
-						receiver_distance_geometrized,
-						receiver_radius_geometrized,
-						epsilon,
-						receiver_box, right_box, forward_box);
-
-					publish_render_state(
-						receiver_box, right_box, forward_box,
-						emitter_r_plus_geometrized,
-						emitter_rho_eq_geometrized,
-						run_index, run_count);
-				}
+				publish_render_state(
+					receiver_box, right_box, forward_box,
+					emitter_r_plus_geometrized,
+					emitter_rho_eq_geometrized,
+					run_index, run_count);
 
 				// beta function
 				const pair<real_type, real_type> collision_count_plus_minus_collision_count =
@@ -1292,28 +1363,40 @@ void run_simulation()
 					gradient_strength * receiver_distance_geometrized * log(2.0)
 					/ (8.0 * emitter_mass_geometrized);
 
-				// --- Point-evaluated analytical base (as before) ---
-				// receiver_distance_geometrized is a Cartesian distance (rho on
-				// the equator); deta_dr wants Boyer-Lindquist r. On the equator
-				// rho^2 = r^2 + a^2, so d(eta)/d(rho) = (rho / r) d(eta)/dr.
-				const vector_3 receiver_center(receiver_distance_geometrized, 0.0, 0.0);
+				// --- Point-evaluated analytical base ---
+				// Evaluated at the real box centre (d sin(theta), 0, d cos(theta)),
+				// differentiating eta along the box's radial axis in Kerr-Schild
+				// Cartesian space. This includes both the d/dr_BL and the
+				// d/dtheta_BL parts, so it is correct at any theta, and it
+				// reduces to the old drBL_drho * deta_dr on the equator.
+				const vector_3 receiver_center = receiver_box.center;
 				const real_type receiver_r_BL = bl_r(receiver_center, emitter_a_geometrized);
+
+				real_type receiver_cos_theta_BL = (receiver_r_BL > 0) ? receiver_center.z / receiver_r_BL : 0.0;
+				if (receiver_cos_theta_BL > 1.0) receiver_cos_theta_BL = 1.0;
+				if (receiver_cos_theta_BL < -1.0) receiver_cos_theta_BL = -1.0;
+				const real_type receiver_theta_BL = acos(receiver_cos_theta_BL);
+
+				// Old equatorial-only conversion, printed for comparison
 				const real_type drBL_drho = receiver_distance_geometrized / receiver_r_BL;
 
 				const real_type a_Kerr_base_point =
-					drBL_drho *
 					(1 / pi) *
-					deta_dr(receiver_r_BL, theta, emitter_mass_geometrized, emitter_a_geometrized);
-
-				// --- Box-averaged analytical base (same stencil as the simulation) ---
-				const real_type a_Kerr_base_box =
-					(1 / pi) *
-					eta_box_gradient(
-						receiver_distance_geometrized,
-						epsilon,
-						receiver_radius_geometrized,
+					eta_directional_derivative(
+						receiver_center,
+						receiver_box.axis[0], // radial unit vector of the box
+						1e-4 * receiver_radius_geometrized,
 						emitter_mass_geometrized,
 						emitter_a_geometrized);
+
+				// --- Box-averaged analytical base (same stencil as the simulation) ---
+				// Forward difference between the right box (shifted radially by
+				// epsilon) and the receiver box, each averaged over its own volume.
+				const real_type a_Kerr_base_box =
+					(1 / pi) *
+					(eta_OBB_average(right_box, emitter_mass_geometrized, emitter_a_geometrized)
+						- eta_OBB_average(receiver_box, emitter_mass_geometrized, emitter_a_geometrized))
+					/ epsilon;
 
 				// The prefactor the simulation actually needs, both ways
 				const real_type k_needed_point = a_flat_geometrized / a_Kerr_base_point;
@@ -1331,7 +1414,8 @@ void run_simulation()
 
 
 				cout << "r_BL - r_+         " << receiver_r_BL - emitter_r_plus_geometrized << endl;
-				cout << "drBL_drho          " << drBL_drho << endl;
+				cout << "theta_BL (deg)     " << receiver_theta_BL * 180.0 / pi << "  (requested " << theta * 180.0 / pi << ")" << endl;
+				cout << "drBL_drho          " << drBL_drho << "  (equator-only, not used)" << endl;
 				cout << "a_flat_geometrized " << a_flat_geometrized << endl;
 				cout << "a_Kerr_geometrized " << a_Kerr_geometrized << "  (k_fit, point base)" << endl;
 				cout << "base point / box   " << a_Kerr_base_point / a_Kerr_base_box << endl;
