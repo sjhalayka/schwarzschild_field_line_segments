@@ -31,7 +31,7 @@ const real_type n_geometrized = 1e9; // field line count
 
 // true: Owen-scrambled Sobol sampling of the chord ends (low noise)
 // false: the original mt19937 sampling
-const bool use_qmc = true;
+const bool use_qmc = false;
 
 
 
@@ -972,7 +972,7 @@ pair<real_type, real_type> get_intersecting_line_density(
 	unsigned int num_threads = std::thread::hardware_concurrency();
 	if (num_threads == 0) num_threads = 4; // Fallback if detection fails
 
-	cout << "Using " << num_threads << " threads for " << n << " iterations" << endl;
+	cout << "Using " << num_threads << " threads for " << (real_type)n << " iterations" << endl;
 
 	std::vector<std::thread> threads;
 	std::vector<real_type> thread_counts(num_threads, 0);
@@ -1146,7 +1146,7 @@ real_type eta_box_gradient(const real_type cx, const real_type eps, const real_t
 // k_needed_box once the box-averaged numbers are in (column 7 of
 // Kerr_prefactor), and add a u^2 term if the near-extremal points bend up.
 // ---------------------------------------------------------------------------
-const real_type kerr_fit_c1 = 1.0;
+const real_type kerr_fit_c1 = 1.0;// lerp(2.64, 1.0, 0.0);
 
 real_type kerr_prefactor_fit(const real_type M, const real_type r_plus)
 {
@@ -1174,7 +1174,7 @@ void run_simulation()
 	// Extra points near extremality, where k changes fastest.
 	// a* = 1 is extremal (r_+ = M), so stay just below it.
 	const vector<real_type> spin_list =
-	{ 0.001, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.999 };
+	{ 0.001, /*0.1, 0.2, 0.3, 0.4, */0.5, /* 0.6, 0.7, 0.8, 0.9,*/ 0.999};
 
 	// Receiver centre at rho_eq + offset * h. offset = 1 is the old placement
 	// (inner face touching the horizon). If k_needed changes with offset at a
@@ -1313,7 +1313,11 @@ void run_simulation()
 				const real_type k_fit = kerr_prefactor_fit(emitter_mass_geometrized, emitter_r_plus_geometrized);
 
 				// k_fit was fitted against the point base, so pair it with that base
-				const real_type a_Kerr_geometrized = k_guess * a_Kerr_base_box;// a_Kerr_base_point;
+				const real_type a_Kerr_geometrized = k_guess * a_Kerr_base_point;
+				const real_type a_Kerr_geometrized2 = k_fit * a_Kerr_base_point;
+				const real_type a_Kerr_geometrized3 = k_guess * a_Kerr_base_box;
+				const real_type a_Kerr_geometrized4 = k_fit * a_Kerr_base_box;
+
 
 				cout << "r_BL - r_+         " << receiver_r_BL - emitter_r_plus_geometrized << endl;
 				cout << "drBL_drho          " << drBL_drho << endl;
@@ -1325,6 +1329,9 @@ void run_simulation()
 				cout << "k_guess            " << k_guess << "  (ratio box/guess " << k_needed_box / k_guess << ")" << endl;
 				cout << "k_fit              " << k_fit << "  (ratio box/fit " << k_needed_box / k_fit << ")" << endl;
 				cout << "a_flat_geometrized / a_Kerr_geometrized " << a_flat_geometrized / a_Kerr_geometrized << endl;
+				cout << "a_flat_geometrized / a_Kerr_geometrized2 " << a_flat_geometrized / a_Kerr_geometrized2 << endl;
+				cout << "a_flat_geometrized / a_Kerr_geometrized3 " << a_flat_geometrized / a_Kerr_geometrized3 << endl;
+				cout << "a_flat_geometrized / a_Kerr_geometrized4 " << a_flat_geometrized / a_Kerr_geometrized4 << endl;
 
 				outfile_k << spin << " " << offset << " " << rep << " "
 					<< receiver_distance_geometrized << " " << receiver_r_BL << " "
