@@ -26,9 +26,9 @@ constexpr T lerp(T a, T b, T t) {
 }
 
 real_type spin = 0.0; // a_*, changed by the spin sweep in run_simulation
-const real_type theta = pi / 2.0;
+const real_type theta = pi / 4.0;
 const real_type phi = 0;
-const real_type n_geometrized = 1e9; // field line count
+const real_type n_geometrized = 1e8; // field line count
 
 // true: Owen-scrambled Sobol sampling of the chord ends (low noise)
 // false: the original mt19937 sampling
@@ -445,12 +445,19 @@ void make_receiver_boxes(
 		vector_3(receiver_radius, receiver_radius, receiver_radius));
 
 	// Same orientation, shifted by epsilon along world +x
-	right_box = translate_OBB(receiver_box, vector_3(epsilon, 0.0, 0.0));
+	//right_box = translate_OBB(receiver_box, vector_3(epsilon, 0.0, 0.0));
+	right_box = make_radial_OBB(
+		receiver_distance + epsilon,
+		theta,
+		phi,
+		vector_3(receiver_radius, receiver_radius, receiver_radius));
+
+
 
 	forward_box = make_radial_OBB(
 		receiver_distance,
 		theta,
-		phi + epsilon / receiver_distance,
+		phi + sqrt(2.0) * epsilon / receiver_distance,
 		vector_3(receiver_radius, receiver_radius, receiver_radius));
 }
 
@@ -462,6 +469,7 @@ void make_receiver_boxes(
 struct render_snapshot
 {
 	OBB receiver_box;
+	OBB right_box;
 	OBB forward_box;
 	real_type emitter_radius = 0; // polar radius r_+
 	real_type emitter_rho_eq = 0; // equatorial radius sqrt(r_+^2 + a^2)
@@ -479,6 +487,7 @@ std::atomic<bool> abort_requested(false);
 
 void publish_render_state(
 	const OBB& receiver_box,
+	const OBB& right_box,
 	const OBB& forward_box,
 	const real_type emitter_radius,
 	const real_type emitter_rho_eq,
@@ -487,6 +496,7 @@ void publish_render_state(
 {
 	std::lock_guard<std::mutex> lock(render_mutex);
 	shared_snapshot.receiver_box = receiver_box;
+	shared_snapshot.right_box = right_box;
 	shared_snapshot.forward_box = forward_box;
 	shared_snapshot.emitter_radius = emitter_radius;
 	shared_snapshot.emitter_rho_eq = emitter_rho_eq;
@@ -1175,7 +1185,7 @@ void run_simulation()
 	// Extra points near extremality, where k changes fastest.
 	// a* = 1 is extremal (r_+ = M), so stay just below it.
 	const vector<real_type> spin_list =
-	{ /*0.001, 0.1, 0.2, 0.3, 0.4, */ 0.5, /* 0.6, 0.7, 0.8, 0.9, 0.999 */};
+	{ /*0.001, 0.1, 0.2, 0.3, 0.4, */ 0.5, /* 0.6, 0.7, 0.8, 0.9, 0.999 */ };
 
 	// Receiver centre at rho_eq + offset * h. offset = 1 is the old placement
 	// (inner face touching the horizon). If k_needed changes with offset at a
@@ -1243,7 +1253,7 @@ void run_simulation()
 						receiver_box, right_box, forward_box);
 
 					publish_render_state(
-						receiver_box, forward_box,
+						receiver_box, right_box, forward_box,
 						emitter_r_plus_geometrized,
 						emitter_rho_eq_geometrized,
 						run_index, run_count);
@@ -1375,7 +1385,7 @@ void run_simulation()
 //   r            reset camera
 //   Esc          quit (also stops the simulation)
 //
-// Everything is drawn relative to the midpoint of the two boxes, computed in
+// Everything is drawn relative to the centroid of the three boxes, computed in
 // real_type (long double) before converting to float, so the boxes stay
 // precise even when they are far from the origin.
 // ===========================================================================
@@ -1976,7 +1986,7 @@ void viz_update_title(const render_snapshot& snap)
 	char buffer[256];
 
 	snprintf(buffer, sizeof(buffer),
-		"Receiver (cyan) / forward (orange) boxes  |  spin step %zu of %zu  |  r = %.6g  |  field lines %zu%s",
+		"Receiver (cyan) / right (magenta) / forward (orange) boxes  |  spin step %zu of %zu  |  r = %.6g  |  field lines %zu%s",
 		snap.step, snap.step_count,
 		static_cast<double>(snap.receiver_box.r),
 		recorded_field_line_count.load(std::memory_order_relaxed),
@@ -2023,9 +2033,10 @@ void viz_display()
 
 	viz_update_title(snap);
 
-	// Everything is drawn relative to the midpoint of the two boxes
-	vector_3 target = snap.receiver_box.center + snap.forward_box.center;
-	target = target * static_cast<real_type>(0.5);
+	// Everything is drawn relative to the centroid of the three boxes
+	vector_3 target = snap.receiver_box.center + snap.right_box.center;
+	target += snap.forward_box.center;
+	target = target / static_cast<real_type>(3.0);
 
 	// Orbit camera, +z up
 	const float cp = cosf(viz_camera_pitch);
@@ -2086,11 +2097,13 @@ void viz_display()
 	}
 
 	// --- Box edges (opaque) ---
-	vector<float> receiver_edges, forward_edges;
+	vector<float> receiver_edges, right_edges, forward_edges;
 	viz_build_OBB_edges(snap.receiver_box, target, receiver_edges);
+	viz_build_OBB_edges(snap.right_box, target, right_edges);
 	viz_build_OBB_edges(snap.forward_box, target, forward_edges);
 
 	viz_draw_dynamic(receiver_edges, GL_LINES, 0.20f, 0.85f, 1.00f, 1.0f);
+	viz_draw_dynamic(right_edges, GL_LINES, 0.95f, 0.30f, 0.95f, 1.0f);
 	viz_draw_dynamic(forward_edges, GL_LINES, 1.00f, 0.60f, 0.15f, 1.0f);
 
 	const real_type field_line_radius = viz_field_line_radius_scale * box_size;
@@ -2134,14 +2147,16 @@ void viz_display()
 	// --- Box faces (translucent, drawn last without depth writes) ---
 	if (viz_show_faces)
 	{
-		vector<float> receiver_faces, forward_faces;
+		vector<float> receiver_faces, right_faces, forward_faces;
 		viz_build_OBB_faces(snap.receiver_box, target, receiver_faces);
+		viz_build_OBB_faces(snap.right_box, target, right_faces);
 		viz_build_OBB_faces(snap.forward_box, target, forward_faces);
 
 		glEnable(GL_BLEND);
 		glDepthMask(GL_FALSE);
 
 		viz_draw_dynamic(receiver_faces, GL_TRIANGLES, 0.20f, 0.85f, 1.00f, 0.15f);
+		viz_draw_dynamic(right_faces, GL_TRIANGLES, 0.95f, 0.30f, 0.95f, 0.15f);
 		viz_draw_dynamic(forward_faces, GL_TRIANGLES, 1.00f, 0.60f, 0.15f, 0.15f);
 
 		glDepthMask(GL_TRUE);
